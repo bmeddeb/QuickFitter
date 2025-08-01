@@ -27,7 +27,6 @@ cd QuickFitter
 ```bash
 python -m http.server 8000
 ```
-OR double click on index.html
 
 3. Open your browser and navigate to `http://localhost:8000`
 
