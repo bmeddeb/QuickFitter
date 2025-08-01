@@ -220,6 +220,14 @@
 
         // Python Script
         const pythonScript = `
+"""
+Refactored Djordjevic-Sarkar dielectric fitting code with:
+- No global state
+- Clear module separation
+- Complex-step Jacobian
+- Improved organization
+"""
+
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -509,8 +517,9 @@ class Optimizer:
         params.add('eps_inf', value=initial.eps_inf, min=1.0, max=dk_data.max())
         params.add('delta_eps', value=initial.delta_eps, min=0, max=10)
 
-        omega1_min = 2 * np.pi * 0.1e9
-        omega2_max = 2 * np.pi * 1500e9
+        # Allow wider frequency range for omega1 and omega2
+        omega1_min = 2 * np.pi * 0.01e9   # 0.01 GHz minimum
+        omega2_max = 2 * np.pi * 10000e9  # 10 THz maximum
 
         params.add('omega1', value=initial.omega1, min=omega1_min, max=omega2_max)
         params.add('omega2', value=initial.omega2, min=omega1_min, max=omega2_max)
