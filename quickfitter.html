@@ -511,19 +511,45 @@ def load_data(csv_content):
     except Exception as e:
         raise ValueError(f"Failed to parse CSV: {e}")
 
-def estimate_initial_parameters(f_ghz, complex_epsilon):
-    dk = np.real(complex_epsilon)
-    eps_inf_init = dk[-1] if len(dk) > 0 else 1.0
-    eps_s_init = dk[0] if len(dk) > 0 else 2.0
-    delta_eps_init = eps_s_init - eps_inf_init
-    omega1_init = 2 * np.pi * (f_ghz[0] if len(f_ghz) > 0 else 1.0) * 1e9
-    omega2_init = 2 * np.pi * (f_ghz[-1] if len(f_ghz) > 0 else 100.0) * 1e9
-    
+def estimate_initial_parameters(f_ghz, complex_epsilon, pct=0.05):
+    """
+    Robust initial guess for a two‐cutoff Djordjevic–Sarkar model.
+    - f_ghz: 1D array of frequencies in GHz (unsorted OK)
+    - complex_epsilon: same‐shape complex permittivity values
+    - pct: fraction of points for averaging at ends
+    """
+    # sort
+    idx = np.argsort(f_ghz)
+    f = np.array(f_ghz)[idx]
+    eps = np.real(complex_epsilon)[idx]
+    df = np.imag(complex_epsilon)[idx]
+
+    n = len(f)
+    k = max(1, int(n * pct))
+    eps_s = np.mean(eps[:k])        # static perm at low freq
+    eps_inf = np.mean(eps[-k:])     # high‐freq perm
+    delta_eps = max(eps_s - eps_inf, 1e-6)
+
+    # find loss peak
+    peak_idx = np.argmax(np.abs(df))
+    f_peak = f[peak_idx]
+
+    f_low = max(f[0],  f_peak / 10)
+    f_high = min(f[-1], f_peak * 10)
+
+    # convert to rad/s
+    ω1 = 2 * np.pi * f_low  * 1e9
+    ω2 = 2 * np.pi * f_high * 1e9
+
+    # safety clamping
+    if ω2 <= ω1:
+        ω2 = ω1 * 10
+
     return {
-        'eps_inf': eps_inf_init,
-        'delta_eps': delta_eps_init,
-        'omega1': omega1_init,
-        'omega2': omega2_init,
+        'eps_inf':    float(eps_inf),
+        'delta_eps':  float(delta_eps),
+        'omega1':     float(ω1),
+        'omega2':     float(ω2),
     }
 
 def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
