@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Dielectric Data Fitter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .spinner {
+            border-top-color: #3498db;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .btn-disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+        /* Style for parameter sliders */
+        input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 8px;
+            background: #d1d5db;
+            border-radius: 5px;
+            outline: none;
+            opacity: 0.7;
+            transition: opacity .2s;
+        }
+        input[type=range]:hover {
+            opacity: 1;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #3b82f6;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        input[type=range]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: #3b82f6;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Interactive Dielectric Data Fitter</h1>
+            <p class="mt-2 text-lg text-gray-600">Upload your dielectric spectroscopy data (CSV) to fit it to the Djordjevic-Sarkar model.</p>
+        </header>
+
+        <div class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+            <!-- Controls Section -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-center mb-6">
+                <div>
+                    <label for="file-upload" class="block text-sm font-medium text-gray-700 mb-2">
+                        Upload CSV File
+                    </label>
+                    <div class="flex items-center space-x-4">
+                        <input type="file" id="file-upload" accept=".csv" class="block w-full text-sm text-gray-500
+                            file:mr-4 file:py-2 file:px-4
+                            file:rounded-lg file:border-0
+                            file:text-sm file:font-semibold
+                            file:bg-blue-50 file:text-blue-700
+                            hover:file:bg-blue-100
+                        ">
+                    </div>
+                     <p class="text-xs text-gray-500 mt-2">Expected columns: Frequency (GHz), Dk, Df</p>
+                </div>
+                <div class="space-y-4">
+                     <div>
+                        <label for="fit-method" class="block text-sm font-medium text-gray-700">Optimization Method</label>
+                        <select id="fit-method" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                            <option value="least_squares" selected>least_squares (Default)</option>
+                            <option value="nelder">nelder</option>
+                            <option value="lbfgsb">lbfgsb</option>
+                        </select>
+                    </div>
+                    <button id="run-button" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
+                        Run Analysis
+                    </button>
+                </div>
+            </div>
+
+            <!-- Status and Output Section -->
+            <div id="status" class="text-center my-4 p-4 bg-gray-50 rounded-lg hidden">
+                <div class="flex items-center justify-center">
+                    <div class="spinner w-6 h-6 rounded-full border-4 border-gray-300"></div>
+                    <p id="status-message" class="ml-4 text-gray-700 font-medium"></p>
+                </div>
+            </div>
+
+            <div id="output" class="hidden mt-8">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <!-- Plot Display -->
+                    <div id="plot-container" class="lg:col-span-2 border border-gray-200 rounded-lg bg-gray-50 p-2">
+                         <div id="plot-output"></div>
+                    </div>
+
+                    <!-- Parameter Controls -->
+                    <div id="controls-panel" class="lg:col-span-1 bg-white p-6 rounded-lg border">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-xl font-bold text-gray-800">Adjust Fit Parameters</h3>
+                            <div class="flex space-x-2">
+                                <button id="reset-button" class="text-sm bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-1 px-3 rounded-lg">
+                                    Reset
+                                </button>
+                                <button id="download-button" class="text-sm bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1 px-3 rounded-lg">
+                                    Download
+                                </button>
+                            </div>
+                        </div>
+                        <div class="space-y-6">
+                            <!-- eps_inf -->
+                            <div>
+                                <label for="eps_inf_slider" class="block text-sm font-medium text-gray-700">ε<sub>inf</sub> (Epsilon Infinity)</label>
+                                <input type="range" id="eps_inf_slider" class="mt-1">
+                                <input type="number" id="eps_inf_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <!-- delta_eps -->
+                            <div>
+                                <label for="delta_eps_slider" class="block text-sm font-medium text-gray-700">Δε (Delta Epsilon)</label>
+                                <input type="range" id="delta_eps_slider" class="mt-1">
+                                <input type="number" id="delta_eps_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <!-- f1 -->
+                            <div>
+                                <label for="omega1_slider" class="block text-sm font-medium text-gray-700">f<sub>1</sub> (GHz)</label>
+                                <input type="range" id="omega1_slider" class="mt-1">
+                                <input type="number" id="omega1_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <!-- f2 -->
+                            <div>
+                                <label for="omega2_slider" class="block text-sm font-medium text-gray-700">f<sub>2</sub> (GHz)</label>
+                                <input type="range" id="omega2_slider" class="mt-1">
+                                <input type="number" id="omega2_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Report Display -->
+                <div class="mt-8">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Fit Report</h2>
+                    <div class="bg-gray-900 text-white font-mono text-sm p-6 rounded-lg overflow-x-auto">
+                        <pre id="report-output"></pre>
+                    </div>
+                </div>
+            </div>
+             <!-- Error Display -->
+            <div id="error-box" class="hidden mt-6 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
+                <h3 class="font-bold">An Error Occurred</h3>
+                <p id="error-message"></p>
+            </div>
+        </div>
+        <footer class="text-center mt-8 text-sm text-gray-500">
+            <p>Powered by Pyodide, lmfit, and your original Python script.</p>
+        </footer>
+    </div>
+
+    <script type="text/javascript">
+        // DOM Elements
+        const fileUpload = document.getElementById('file-upload');
+        const runButton = document.getElementById('run-button');
+        const resetButton = document.getElementById('reset-button');
+        const downloadButton = document.getElementById('download-button');
+        const fitMethodSelect = document.getElementById('fit-method');
+        const statusDiv = document.getElementById('status');
+        const statusMessage = document.getElementById('status-message');
+        const outputDiv = document.getElementById('output');
+        const plotOutput = document.getElementById('plot-output');
+        const reportOutput = document.getElementById('report-output');
+        const errorBox = document.getElementById('error-box');
+        const errorMessage = document.getElementById('error-message');
+        
+        // Parameter Controls
+        const paramControls = {
+            eps_inf: { slider: document.getElementById('eps_inf_slider'), input: document.getElementById('eps_inf_input') },
+            delta_eps: { slider: document.getElementById('delta_eps_slider'), input: document.getElementById('delta_eps_input') },
+            omega1: { slider: document.getElementById('omega1_slider'), input: document.getElementById('omega1_input') },
+            omega2: { slider: document.getElementById('omega2_slider'), input: document.getElementById('omega2_input') },
+        };
+
+        // Global State
+        let pyodide = null;
+        let fileContent = null;
+        let isPyodideReady = false;
+        let currentData = null;
+        let originalFilename = '';
+        let originalCorrelations = null;
+
+        // Python Script
+        const pythonScript = `
+import sys
+import io
+import json
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
+from lmfit import Minimizer, Parameters, fit_report
+
+# Global variables to store data
+global_f_ghz = None
+global_complex_epsilon = None
+global_correlation_matrix = None
+global_measured_dk = None
+global_measured_df = None
+
+def load_data(csv_content):
+    global global_f_ghz, global_complex_epsilon
+    try:
+        data = pd.read_csv(io.StringIO(csv_content)).dropna()
+        f_ghz = data.iloc[:, 0].values
+        dk = data.iloc[:, 1].values
+        df = data.iloc[:, 2].values
+        complex_epsilon = dk - 1j * (dk * df)
+        global_f_ghz = f_ghz
+        global_complex_epsilon = complex_epsilon
+        return f_ghz, complex_epsilon
+    except Exception as e:
+        raise ValueError(f"Failed to parse CSV: {e}")
+
+def estimate_initial_parameters(f_ghz, complex_epsilon):
+    dk = np.real(complex_epsilon)
+    eps_inf_init = dk[-1] if len(dk) > 0 else 1.0
+    eps_s_init = dk[0] if len(dk) > 0 else 2.0
+    delta_eps_init = eps_s_init - eps_inf_init
+    omega1_init = 2 * np.pi * (f_ghz[0] if len(f_ghz) > 0 else 1.0) * 1e9
+    omega2_init = 2 * np.pi * (f_ghz[-1] if len(f_ghz) > 0 else 100.0) * 1e9
+    
+    return {
+        'eps_inf': eps_inf_init,
+        'delta_eps': delta_eps_init,
+        'omega1': omega1_init,
+        'omega2': omega2_init,
+    }
+
+def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
+    global global_f_ghz
+    if global_f_ghz is None:
+        return json.dumps({"error": "No data loaded"})
+    
+    f_ghz = global_f_ghz
+    omega = 2 * np.pi * f_ghz * 1e9
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        if omega2 <= 0 or omega1 <= 0 or omega2 <= omega1:
+            eps_prime = np.full_like(f_ghz, np.nan)
+            eps_double_prime = np.full_like(f_ghz, np.nan)
+        else:
+            log_term = np.log((omega2**2 + omega**2) / (omega1**2 + omega**2))
+            eps_prime = eps_inf + (delta_eps / (2 * np.log(omega2 / omega1))) * log_term
+            atan_term = np.arctan(omega / omega1) - np.arctan(omega / omega2)
+            eps_double_prime = -(delta_eps / np.log(omega2 / omega1)) * atan_term
+    
+    return json.dumps({
+        "eps_prime": eps_prime.tolist(),
+        "eps_double_prime": eps_double_prime.tolist()
+    })
+
+def calculate_model(params, f_ghz):
+    p = params
+    omega = 2 * np.pi * f_ghz * 1e9
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        if p['omega2'] <= 0 or p['omega1'] <= 0 or p['omega2'] <= p['omega1']:
+            eps_prime = np.full_like(f_ghz, np.nan)
+            eps_double_prime = np.full_like(f_ghz, np.nan)
+        else:
+            log_term = np.log((p['omega2']**2 + omega**2) / (p['omega1']**2 + omega**2))
+            eps_prime = p['eps_inf'] + (p['delta_eps'] / (2 * np.log(p['omega2'] / p['omega1']))) * log_term
+            atan_term = np.arctan(omega / p['omega1']) - np.arctan(omega / p['omega2'])
+            eps_double_prime = -(p['delta_eps'] / np.log(p['omega2'] / p['omega1'])) * atan_term
+    
+    return eps_prime + 1j * eps_double_prime
+
+def residual(params, f_ghz, complex_epsilon_data):
+    p_dict = params.valuesdict()
+    model_epsilon = calculate_model(p_dict, f_ghz)
+    
+    real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
+    imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
+    return np.concatenate([real_residual, imag_residual])
+
+def calculate_jacobian(params_dict, f_ghz, h=1e-8):
+    """Calculate Jacobian matrix using finite differences"""
+    param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
+    n_params = len(param_names)
+    n_data = len(f_ghz) * 2  # real and imag parts
+    
+    jacobian = np.zeros((n_data, n_params))
+    
+    # Base model
+    base_model = calculate_model(params_dict, f_ghz)
+    base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
+    
+    # Calculate derivatives
+    for i, param_name in enumerate(param_names):
+        params_plus = params_dict.copy()
+        params_plus[param_name] += h
+        
+        model_plus = calculate_model(params_plus, f_ghz)
+        residual_plus = np.concatenate([np.real(model_plus), np.imag(model_plus)])
+        
+        jacobian[:, i] = (residual_plus - base_residual) / h
+    
+    return jacobian
+
+def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
+    """Calculate correlation matrix from Jacobian"""
+    try:
+        # Calculate Jacobian
+        J = calculate_jacobian(params_dict, f_ghz)
+        
+        # Calculate covariance matrix: (J^T J)^-1
+        JTJ = np.dot(J.T, J)
+        
+        # Add small regularization to ensure positive definite
+        JTJ += np.eye(JTJ.shape[0]) * 1e-10
+        
+        # Calculate covariance
+        cov_matrix = np.linalg.inv(JTJ)
+        
+        # Convert to correlation matrix
+        std_devs = np.sqrt(np.diag(cov_matrix))
+        corr_matrix = np.zeros_like(cov_matrix)
+        
+        for i in range(len(std_devs)):
+            for j in range(len(std_devs)):
+                if std_devs[i] > 0 and std_devs[j] > 0:
+                    corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
+                else:
+                    corr_matrix[i, j] = 0
+        
+        return corr_matrix
+    except:
+        return None
+
+def format_correlation_matrix(corr_matrix):
+    """Format correlation matrix for display"""
+    if corr_matrix is None:
+        return "Unable to calculate correlation matrix"
+    
+    param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
+    result = "Correlations:\\n"
+    
+    for i, param1 in enumerate(param_names):
+        for j, param2 in enumerate(param_names):
+            if j > i:  # Only show upper triangle
+                correlation = corr_matrix[i, j]
+                if abs(correlation) > 0.1:  # Only show significant correlations
+                    result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
+    
+    return result
+
+def create_updated_report(eps_inf, delta_eps, omega1, omega2):
+    global global_f_ghz, global_complex_epsilon
+    if global_f_ghz is None:
+        return json.dumps({"error": "No data loaded"})
+
+    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
+    model_epsilon = calculate_model(params, global_f_ghz)
+    
+    real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
+    imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
+    
+    n_dat = len(real_residuals) + len(imag_residuals)
+    n_var = 4
+    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+    # Calculate correlation matrix for current parameters
+    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
+    corr_text = format_correlation_matrix(corr_matrix)
+
+    # Create JSON data structure
+    json_data = {
+        "model": "Djordjevic-Sarkar",
+        "timestamp": datetime.now().isoformat(),
+        "parameters": {
+            "eps_inf": eps_inf,
+            "delta_eps": delta_eps,
+            "omega1": omega1,
+            "omega2": omega2,
+            "f1_ghz": omega1 / (2 * np.pi * 1e9),
+            "f2_ghz": omega2 / (2 * np.pi * 1e9)
+        },
+        "fit_statistics": {
+            "n_data_points": n_dat,
+            "n_variables": n_var,
+            "chi_square": chi_sqr,
+            "reduced_chi_square": red_chi_sqr
+        },
+        "residual_analysis": {
+            "real_part": {
+                "mean": float(np.mean(real_residuals)),
+                "std_dev": float(np.std(real_residuals)),
+                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+            },
+            "imaginary_part": {
+                "mean": float(np.mean(imag_residuals)),
+                "std_dev": float(np.std(imag_residuals)),
+                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            }
+        },
+        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+    }
+
+    report = f"""Djordjevic-Sarkar Fit Report
+{'=' * 50}
+Date: {datetime.now()}
+
+Model and Parameters
+--------------------------------------------------
+ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
+ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
+
+Using current values (manual):
+    eps_inf   = {eps_inf:.4f}
+    delta_eps = {delta_eps:.4f}
+    omega1    = {omega1:.4e}
+    omega2    = {omega2:.4e}
+
+Fit Statistics
+    # data points = {n_dat}
+    # variables   = {n_var}
+    chi-square    = {chi_sqr:.4f}
+    reduced chi-square = {red_chi_sqr:.4f}
+
+Residual Analysis
+    Real Part (Dk):
+        Mean: {np.mean(real_residuals):.4f}
+        Std Dev: {np.std(real_residuals):.4f}
+        RMS: {np.sqrt(np.mean(real_residuals**2)):.4f}
+    Imaginary Part (Loss Factor):
+        Mean: {np.mean(imag_residuals):.4f}
+        Std Dev: {np.std(imag_residuals):.4f}
+        RMS: {np.sqrt(np.mean(imag_residuals**2)):.4f}
+
+{corr_text}
+"""
+    return json.dumps({"report": report, "json_data": json_data})
+
+
+def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
+    fig = make_subplots(rows=2, cols=1, subplot_titles=('Real Permittivity', 'Loss Tangent'))
+    fig.add_trace(go.Scatter(x=f_ghz, y=np.real(measured_eps), mode='markers', name='Measured Dk', marker=dict(color='black')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=f_ghz, y=np.real(fitted_eps), mode='lines', name='Fitted Dk', line=dict(color='red')), row=1, col=1)
+    measured_df = -np.imag(measured_eps) / np.real(measured_eps)
+    fitted_df = -np.imag(fitted_eps) / np.real(fitted_eps)
+    fig.add_trace(go.Scatter(x=f_ghz, y=measured_df, mode='markers', name='Measured Df', marker=dict(color='black'), showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=f_ghz, y=fitted_df, mode='lines', name='Fitted Df', line=dict(color='red'), showlegend=False), row=2, col=1)
+    fig.update_xaxes(title_text="Frequency (GHz)", row=1, col=1)
+    fig.update_yaxes(title_text="Dielectric Constant (Dk)", row=1, col=1)
+    fig.update_xaxes(title_text="Frequency (GHz)", row=2, col=1)
+    fig.update_yaxes(title_text="Dissipation Factor (Df)", row=2, col=1)
+    fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), template="plotly_white", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99))
+    return pio.to_json(fig)
+
+def get_measured_data():
+    """Return the stored measured data"""
+    global global_measured_dk, global_measured_df
+    return json.dumps({
+        "measured_dk": global_measured_dk if global_measured_dk is not None else [],
+        "measured_df": global_measured_df if global_measured_df is not None else []
+    })
+
+def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
+    global global_f_ghz, global_complex_epsilon
+    if global_f_ghz is None:
+        return None
+
+    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
+    fitted_epsilon = calculate_model(params, global_f_ghz)
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+    
+    ax1.plot(global_f_ghz, np.real(global_complex_epsilon), 'ko', label='Measured')
+    ax1.plot(global_f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
+    ax1.set_xlabel('Frequency (GHz)')
+    ax1.set_ylabel('Dielectric Constant (Dk)')
+    ax1.set_title('Real Permittivity')
+    ax1.legend()
+    ax1.grid(True, alpha=0.5)
+
+    measured_df = -np.imag(global_complex_epsilon) / np.real(global_complex_epsilon)
+    fitted_df = -np.imag(fitted_epsilon) / np.real(fitted_epsilon)
+    ax2.plot(global_f_ghz, measured_df, 'ko', label='Measured')
+    ax2.plot(global_f_ghz, fitted_df, 'r-', lw=2, label='Fitted')
+    ax2.set_xlabel('Frequency (GHz)')
+    ax2.set_ylabel('Dissipation Factor (Df)')
+    ax2.set_title('Loss Tangent')
+    ax2.legend()
+    ax2.grid(True, alpha=0.5)
+
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+def run_analysis(csv_content, method):
+    global global_f_ghz, global_complex_epsilon, global_correlation_matrix, global_measured_dk, global_measured_df
+    f_ghz, complex_epsilon_data = load_data(csv_content)
+    
+    # Store measured data globally
+    global_measured_dk = np.real(complex_epsilon_data).tolist()
+    global_measured_df = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
+    
+    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data)
+    params = Parameters()
+    dk_data = np.real(complex_epsilon_data)
+    params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
+    params.add('delta_eps', value=initial_params['delta_eps'], min=0, max=10)
+    omega1_min_rad = 2 * np.pi * 0.1e9
+    omega2_max_rad = 2 * np.pi * 1500e9
+    params.add('omega1', value=initial_params['omega1'], min=omega1_min_rad, max=omega2_max_rad)
+    params.add('omega2', value=initial_params['omega2'], min=omega1_min_rad, max=omega2_max_rad)
+    
+    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data))
+    result = minimizer.minimize(method=method)
+    
+    fit_params = {p: float(v.value) for p, v in result.params.items()}
+    
+    # Extract correlation matrix from fit result
+    correlations_str = ""
+    if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
+        global_correlation_matrix = result.covar
+        correlations_str = "\\nCorrelations (from optimization):\\n"
+        for i, name1 in enumerate(result.var_names):
+            for j, name2 in enumerate(result.var_names):
+                if j > i:
+                    corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
+                    if abs(corr_val) > 0.1:
+                        correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
+    
+    report_content = fit_report(result).replace('[[', '').replace(']]', '')
+    
+    model_section = f"""Model and Parameters
+--------------------------------------------------
+ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
+ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
+
+Using fitted values:
+    eps_inf   = {fit_params['eps_inf']:.4f}
+    delta_eps = {fit_params['delta_eps']:.4f}
+    omega1    = {fit_params['omega1']:.4e}
+    omega2    = {fit_params['omega2']:.4e}
+"""
+    
+    full_report = f"Djordjevic-Sarkar Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{report_content}"
+    
+    fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
+    plot_json = create_plotly_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
+    
+    return_data = {
+        "report": full_report,
+        "plot_json": plot_json,
+        "f_ghz": f_ghz.tolist(),
+        "fitted_params": fit_params,
+        "correlations": correlations_str,
+        "measured_dk": global_measured_dk,
+        "measured_df": global_measured_df
+    }
+    return json.dumps(return_data)
+`;
+
+        async function main() {
+            setLoadingState(true, 'Initializing Environment...');
+            try {
+                pyodide = await loadPyodide({
+                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"
+                });
+                setLoadingState(true, 'Loading Python Packages...');
+                await pyodide.loadPackage(['numpy', 'pandas', 'micropip', 'matplotlib']);
+                const micropip = pyodide.pyimport('micropip');
+                setLoadingState(true, 'Installing lmfit & plotly...');
+                await micropip.install(['lmfit', 'plotly']);
+                isPyodideReady = true;
+                await pyodide.runPythonAsync(pythonScript);
+                setLoadingState(false);
+            } catch (err) {
+                isPyodideReady = false;
+                showError(`Failed to initialize Python environment: ${err}`);
+                setLoadingState(false);
+            }
+        }
+
+        function setLoadingState(isLoading, message = '') {
+            statusMessage.textContent = message;
+            statusDiv.style.display = isLoading ? 'flex' : 'none';
+            runButton.disabled = isLoading;
+            runButton.classList.toggle('btn-disabled', isLoading);
+            if (!isLoading) updateButtonState();
+        }
+
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorBox.classList.remove('hidden');
+            outputDiv.classList.add('hidden');
+        }
+
+        function hideError() {
+            errorBox.classList.add('hidden');
+        }
+
+        function updateButtonState() {
+            const isReady = isPyodideReady && !!fileContent;
+            runButton.disabled = !isReady;
+            runButton.classList.toggle('btn-disabled', !isReady);
+        }
+
+        function setupParameterControls(params) {
+            const twoPi = 2 * Math.PI;
+            const f1_ghz = params.omega1 / (twoPi * 1e9);
+            const f2_ghz = params.omega2 / (twoPi * 1e9);
+
+            const uiParams = {
+                eps_inf: params.eps_inf,
+                delta_eps: params.delta_eps,
+                omega1: f1_ghz,
+                omega2: f2_ghz
+            };
+            
+            const ranges = {
+                eps_inf: { min: 1, max: Math.max(uiParams.eps_inf * 2, 10), step: 0.01 },
+                delta_eps: { min: 0, max: Math.max(uiParams.delta_eps * 2, 5), step: 0.01 },
+                omega1: { min: uiParams.omega1 / 10, max: uiParams.omega1 * 10, step: uiParams.omega1 / 100 },
+                omega2: { min: uiParams.omega2 / 10, max: uiParams.omega2 * 10, step: uiParams.omega2 / 100 },
+            };
+
+            for (const key in uiParams) {
+                if (paramControls[key]) {
+                    const { slider, input } = paramControls[key];
+                    const range = ranges[key];
+                    
+                    slider.min = range.min;
+                    slider.max = range.max;
+                    slider.step = range.step;
+                    slider.value = uiParams[key];
+                    
+                    input.min = range.min;
+                    input.max = range.max;
+                    input.step = range.step;
+                    input.value = uiParams[key];
+                }
+            }
+        }
+
+        async function updateUIFromControls() {
+            if (!currentData || !pyodide) return;
+            
+            const eps_inf = parseFloat(paramControls.eps_inf.input.value);
+            const delta_eps = parseFloat(paramControls.delta_eps.input.value);
+            const f1_ghz = parseFloat(paramControls.omega1.input.value);
+            const f2_ghz = parseFloat(paramControls.omega2.input.value);
+
+            const twoPi = 2 * Math.PI;
+            const omega1 = f1_ghz * twoPi * 1e9;
+            const omega2 = f2_ghz * twoPi * 1e9;
+
+            try {
+                // Update Plot
+                const calculateFunc = pyodide.globals.get('calculate_model_from_params');
+                const modelJson = calculateFunc(eps_inf, delta_eps, omega1, omega2);
+                const modelResults = JSON.parse(modelJson);
+                
+                if (modelResults.error) return;
+
+                const fittedDk = modelResults.eps_prime;
+                const fittedDf = fittedDk.map((dk, i) => -modelResults.eps_double_prime[i] / dk);
+                Plotly.restyle('plot-output', { y: [fittedDk, fittedDf] }, [1, 3]);
+
+                // Update Report with correlation matrix
+                const generateReportFunc = pyodide.globals.get('create_updated_report');
+                const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
+                const reportData = JSON.parse(reportJson);
+                reportOutput.textContent = reportData.report;
+                
+            } catch (err) {
+                console.error('Error updating UI:', err);
+            }
+        }
+        
+        function resetParameters() {
+            if (!currentData || !currentData.fitted_params) return;
+            setupParameterControls(currentData.fitted_params);
+            
+            const plotData = JSON.parse(currentData.plot_json);
+            Plotly.restyle('plot-output', {
+                y: [plotData.data[1].y, plotData.data[3].y]
+            }, [1, 3]);
+            reportOutput.textContent = currentData.report;
+        }
+
+        async function downloadResults() {
+            if (!currentData) return;
+            setLoadingState(true, 'Preparing download...');
+            try {
+                const zip = new JSZip();
+                const baseFilename = originalFilename.replace(/\.csv$/i, '');
+
+                const eps_inf = parseFloat(paramControls.eps_inf.input.value);
+                const delta_eps = parseFloat(paramControls.delta_eps.input.value);
+                const f1_ghz = parseFloat(paramControls.omega1.input.value);
+                const f2_ghz = parseFloat(paramControls.omega2.input.value);
+                const twoPi = 2 * Math.PI;
+                const omega1 = f1_ghz * twoPi * 1e9;
+                const omega2 = f2_ghz * twoPi * 1e9;
+
+                // 1. Create Fitted Data CSV from current slider values
+                const calculateFunc = pyodide.globals.get('calculate_model_from_params');
+                const modelJson = calculateFunc(eps_inf, delta_eps, omega1, omega2);
+                const modelResults = JSON.parse(modelJson);
+                
+                let csvContent = "Frequency_GHz,fitted_Dk,fitted_Df\n";
+                currentData.f_ghz.forEach((f, i) => {
+                    const dk = modelResults.eps_prime[i];
+                    const df = dk === 0 ? 0 : -modelResults.eps_double_prime[i] / dk;
+                    csvContent += `${f},${dk},${df}\n`;
+                });
+                zip.file(`${baseFilename}_fitted.csv`, csvContent);
+
+                // 2. Add Matplotlib Plot Image from current slider values
+                const createPlotFunc = pyodide.globals.get('create_downloadable_plot');
+                const imageProxy = createPlotFunc(eps_inf, delta_eps, omega1, omega2);
+                const imageData = imageProxy.toJs();
+                imageProxy.destroy();
+                zip.file(`${baseFilename}_plot.png`, imageData);
+
+                // 3. Add Report from current text content (human-readable .txt)
+                zip.file(`${baseFilename}_report.txt`, reportOutput.textContent);
+
+                // 4. Generate JSON report for database ingestion
+                const generateReportFunc = pyodide.globals.get('create_updated_report');
+                const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
+                const reportData = JSON.parse(reportJson);
+                
+                // Get measured data from currentData
+                let measuredDk = currentData.measured_dk || [];
+                let measuredDf = currentData.measured_df || [];
+                
+                // Add additional fields to JSON
+                const fullJsonReport = {
+                    ...reportData.json_data,
+                    input_file: originalFilename,
+                    data: {
+                        frequency_ghz: currentData.f_ghz,
+                        measured: {
+                            dk: measuredDk,
+                            df: measuredDf
+                        },
+                        fitted: {
+                            dk: modelResults.eps_prime,
+                            df: modelResults.eps_prime.map((dk, i) => {
+                                return dk === 0 ? 0 : -modelResults.eps_double_prime[i] / dk;
+                            })
+                        }
+                    }
+                };
+                
+                zip.file(`${baseFilename}_report.json`, JSON.stringify(fullJsonReport, null, 2));
+
+                // 5. Generate and Download Zip
+                const content = await zip.generateAsync({ type: "blob" });
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(content);
+                link.download = `${baseFilename}_results.zip`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+            } catch(err) {
+                showError(`Failed to create download package: ${err}`);
+            } finally {
+                setLoadingState(false);
+            }
+        }
+
+        // Set up event listeners
+        let updateTimeout;
+        Object.entries(paramControls).forEach(([key, { slider, input }]) => {
+            slider.addEventListener('input', (e) => {
+                input.value = e.target.value;
+                clearTimeout(updateTimeout);
+                updateTimeout = setTimeout(updateUIFromControls, 50);
+            });
+            
+            input.addEventListener('input', (e) => {
+                slider.value = e.target.value;
+                clearTimeout(updateTimeout);
+                updateTimeout = setTimeout(updateUIFromControls, 50);
+            });
+        });
+
+        fileUpload.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                originalFilename = file.name;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    fileContent = e.target.result;
+                    updateButtonState();
+                };
+                reader.readAsText(file);
+            } else {
+                fileContent = null;
+                originalFilename = '';
+                updateButtonState();
+            }
+        });
+
+        runButton.addEventListener('click', async () => {
+            if (!fileContent || !pyodide) return;
+            hideError();
+            setLoadingState(true, 'Running analysis...');
+            outputDiv.classList.add('hidden');
+
+            try {
+                const runAnalysis = pyodide.globals.get('run_analysis');
+                const fitMethod = fitMethodSelect.value;
+                const resultJson = runAnalysis(fileContent, fitMethod);
+                const result = JSON.parse(resultJson);
+                
+                currentData = result;
+                originalCorrelations = result.correlations;
+                
+                const plotData = JSON.parse(result.plot_json);
+                plotOutput.innerHTML = '';
+                Plotly.newPlot('plot-output', plotData.data, plotData.layout, {responsive: true});
+
+                // Store measured data in currentData from the result
+                currentData.measured_dk = result.measured_dk;
+                currentData.measured_df = result.measured_df;
+
+                reportOutput.textContent = result.report;
+                setupParameterControls(result.fitted_params);
+                
+                outputDiv.classList.remove('hidden');
+
+            } catch (err) {
+                console.error(err);
+                showError(`An error occurred during analysis: ${err.message}`);
+            } finally {
+                setLoadingState(false);
+            }
+        });
+        
+        resetButton.addEventListener('click', resetParameters);
+        downloadButton.addEventListener('click', downloadResults);
+
+        // Initialize
+        main();
+        updateButtonState();
+    </script>
+</body>
+</html>
