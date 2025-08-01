@@ -220,49 +220,90 @@
 
         // Python Script
         const pythonScript = `
-import sys
-import io
-import json
-from datetime import datetime
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Any, Optional
+from datetime import datetime
+import json
+import io
+import math
+from lmfit import Parameters, Minimizer, fit_report
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.io as pio
-from lmfit import Minimizer, Parameters, fit_report
-import math
 import logging
-from typing import Dict, Tuple, Any, List, Optional
-from dataclasses import dataclass, field
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Fit Evaluator Classes
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+@dataclass
+class FitData:
+    """Container for all fitting data"""
+    f_ghz: np.ndarray
+    complex_eps: np.ndarray
+    measured_dk: List[float] = field(default_factory=list)
+    measured_df: List[float] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Calculate derived properties"""
+        if len(self.measured_dk) == 0:
+            self.measured_dk = np.real(self.complex_eps).tolist()
+        if len(self.measured_df) == 0:
+            self.measured_df = (-np.imag(self.complex_eps) / np.real(self.complex_eps)).tolist()
+
+
+@dataclass
+class FitParameters:
+    """Djordjevic-Sarkar model parameters"""
+    eps_inf: float
+    delta_eps: float
+    omega1: float
+    omega2: float
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            'eps_inf': self.eps_inf,
+            'delta_eps': self.delta_eps,
+            'omega1': self.omega1,
+            'omega2': self.omega2
+        }
+
+    @property
+    def f1_ghz(self) -> float:
+        return self.omega1 / (2 * np.pi * 1e9)
+
+    @property
+    def f2_ghz(self) -> float:
+        return self.omega2 / (2 * np.pi * 1e9)
+
+
 @dataclass
 class MetricResult:
-    """Stores the evaluation result for a single metric."""
+    """Stores the evaluation result for a single metric"""
     name: str
     score: float
     category: str
     value: float
-    suggestion: str | None = None
+    suggestion: Optional[str] = None
     details: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class ReportEvaluation:
-    """Stores the full evaluation for a report."""
+    """Stores the full evaluation for a report"""
     metrics: Dict[str, MetricResult]
     overall: MetricResult
     suggestions: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     def to_markdown(self) -> str:
-        """Return the evaluation as a markdown-formatted table."""
+        """Return the evaluation as a markdown-formatted table"""
         headers = ["Metric", "Score", "Category", "Value", "Suggestion"]
         lines = ["| " + " | ".join(headers) + " |",
                  "| " + " | ".join(["---"]*len(headers)) + " |"]
@@ -277,20 +318,20 @@ class ReportEvaluation:
             for warning in self.warnings:
                 lines.append(f"- {warning}")
         return "\\n".join(lines)
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert evaluation to dictionary format."""
+        """Convert evaluation to dictionary format"""
         return {
             'overall_score': self.overall.score,
             'overall_category': self.overall.category,
             'metrics': {
                 k: {
-                    'score': v.score, 
-                    'category': v.category, 
+                    'score': v.score,
+                    'category': v.category,
                     'value': v.value,
                     'suggestion': v.suggestion,
                     'details': v.details
-                } 
+                }
                 for k, v in self.metrics.items()
             },
             'suggestions': self.suggestions,
@@ -298,13 +339,231 @@ class ReportEvaluation:
             'markdown_table': self.to_markdown()
         }
 
+
+# ============================================================================
+# I/O and Data Loading
+# ============================================================================
+
+class DataLoader:
+    """Handles data loading and parsing"""
+
+    @staticmethod
+    def load_from_csv(csv_content: str) -> FitData:
+        """Load data from CSV content"""
+        try:
+            data = pd.read_csv(io.StringIO(csv_content)).dropna()
+            f_ghz = data.iloc[:, 0].values
+            dk = data.iloc[:, 1].values
+            df = data.iloc[:, 2].values
+            complex_epsilon = dk - 1j * (dk * df)
+
+            return FitData(
+                f_ghz=f_ghz,
+                complex_eps=complex_epsilon,
+                measured_dk=dk.tolist(),
+                measured_df=df.tolist()
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to parse CSV: {e}")
+
+
+# ============================================================================
+# Model and Physics
+# ============================================================================
+
+class DjordjevicSarkarModel:
+    """Djordjevic-Sarkar dielectric model implementation"""
+
+    @staticmethod
+    def calculate(params: Dict[str, Any], f_ghz: np.ndarray) -> np.ndarray:
+        """Calculate complex permittivity from model parameters"""
+        omega = 2 * np.pi * f_ghz * 1e9
+
+        # Extract real part of parameters (in case of complex-step)
+        eps_inf = np.real(params['eps_inf'])
+        delta_eps = np.real(params['delta_eps'])
+        omega1 = np.real(params['omega1'])
+        omega2 = np.real(params['omega2'])
+
+        # Check if any parameter has imaginary part (complex-step)
+        if any(np.iscomplex(params[k]) for k in params):
+            # We're in complex-step mode, use complex arithmetic
+            eps_inf = params['eps_inf']
+            delta_eps = params['delta_eps']
+            omega1 = params['omega1']
+            omega2 = params['omega2']
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            if np.real(omega2) <= 0 or np.real(omega1) <= 0 or np.real(omega2) <= np.real(omega1):
+                return np.full_like(f_ghz, np.nan, dtype=complex)
+
+            log_term = np.log((omega2**2 + omega**2) / (omega1**2 + omega**2))
+            eps_prime = eps_inf + (delta_eps / (2 * np.log(omega2 / omega1))) * log_term
+
+            atan_term = np.arctan(omega / omega1) - np.arctan(omega / omega2)
+            eps_double_prime = -(delta_eps / np.log(omega2 / omega1)) * atan_term
+
+            return eps_prime + 1j * eps_double_prime
+
+    @staticmethod
+    def residual(params: Parameters, f_ghz: np.ndarray, complex_epsilon_data: np.ndarray) -> np.ndarray:
+        """Calculate residuals for optimization"""
+        p_dict = params.valuesdict()
+        model_epsilon = DjordjevicSarkarModel.calculate(p_dict, f_ghz)
+
+        real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
+        imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
+        return np.concatenate([real_residual, imag_residual])
+
+    @staticmethod
+    def complex_step_jacobian(params_dict: Dict[str, float], f_ghz: np.ndarray, h: float = 1e-20) -> np.ndarray:
+        """
+        Calculate Jacobian using complex-step differentiation.
+        This is numerically exact to machine precision for small h.
+        """
+        names = list(params_dict.keys())
+        n = len(names)
+
+        # Calculate base model
+        base = DjordjevicSarkarModel.calculate(params_dict, f_ghz)
+        base_vec = np.concatenate([base.real, base.imag])
+
+        # Initialize Jacobian
+        J = np.zeros((base_vec.size, n))
+
+        # Calculate derivatives using complex step
+        for i, name in enumerate(names):
+            p2 = params_dict.copy()
+            p2[name] += h * 1j  # Add imaginary perturbation
+
+            # Calculate perturbed model
+            y2 = DjordjevicSarkarModel.calculate(p2, f_ghz)
+            vec2 = np.concatenate([y2.real, y2.imag])
+
+            # Extract derivative from imaginary part
+            J[:, i] = np.imag(vec2) / h
+
+        return J
+
+    @staticmethod
+    def estimate_initial_parameters(fit_data: FitData, pct: float = 0.05) -> FitParameters:
+        """
+        Robust initial guess for model parameters.
+
+        Args:
+            fit_data: FitData object containing frequency and permittivity
+            pct: fraction of points for averaging at ends
+        """
+        # Sort data by frequency
+        idx = np.argsort(fit_data.f_ghz)
+        f = fit_data.f_ghz[idx]
+        eps = np.real(fit_data.complex_eps)[idx]
+        df = np.imag(fit_data.complex_eps)[idx]
+
+        n = len(f)
+        k = max(1, int(n * pct))
+
+        # Estimate parameters
+        eps_s = np.mean(eps[:k])        # static permittivity at low freq
+        eps_inf = np.mean(eps[-k:])     # high-freq permittivity
+        delta_eps = max(eps_s - eps_inf, 1e-6)
+
+        # Find loss peak
+        peak_idx = np.argmax(np.abs(df))
+        f_peak = f[peak_idx]
+
+        f_low = max(f[0], f_peak / 10)
+        f_high = min(f[-1], f_peak * 10)
+
+        # Convert to rad/s
+        omega1 = 2 * np.pi * f_low * 1e9
+        omega2 = 2 * np.pi * f_high * 1e9
+
+        # Safety check
+        if omega2 <= omega1:
+            omega2 = omega1 * 10
+
+        return FitParameters(
+            eps_inf=float(eps_inf),
+            delta_eps=float(delta_eps),
+            omega1=float(omega1),
+            omega2=float(omega2)
+        )
+
+
+# ============================================================================
+# Optimization
+# ============================================================================
+
+class Optimizer:
+    """Handles the optimization process"""
+
+    def __init__(self, fit_data: FitData):
+        self.fit_data = fit_data
+
+    def create_parameters(self, initial: FitParameters) -> Parameters:
+        """Create lmfit Parameters object with bounds"""
+        params = Parameters()
+        dk_data = np.real(self.fit_data.complex_eps)
+
+        params.add('eps_inf', value=initial.eps_inf, min=1.0, max=dk_data.max())
+        params.add('delta_eps', value=initial.delta_eps, min=0, max=10)
+
+        omega1_min = 2 * np.pi * 0.1e9
+        omega2_max = 2 * np.pi * 1500e9
+
+        params.add('omega1', value=initial.omega1, min=omega1_min, max=omega2_max)
+        params.add('omega2', value=initial.omega2, min=omega1_min, max=omega2_max)
+
+        return params
+
+    def jacobian_wrapper(self, params: Parameters, f_ghz: np.ndarray, complex_eps: np.ndarray) -> np.ndarray:
+        """Wrapper to use complex-step Jacobian with lmfit"""
+        return DjordjevicSarkarModel.complex_step_jacobian(params.valuesdict(), f_ghz)
+
+    def optimize(self, method: str = 'leastsq') -> Tuple[FitParameters, Any]:
+        """Run optimization and return fitted parameters"""
+        # Get initial guess
+        initial = DjordjevicSarkarModel.estimate_initial_parameters(self.fit_data)
+
+        # Create parameters
+        params = self.create_parameters(initial)
+
+        # Create minimizer with complex-step Jacobian
+        minimizer = Minimizer(
+            DjordjevicSarkarModel.residual,
+            params,
+            fcn_args=(self.fit_data.f_ghz, self.fit_data.complex_eps),
+            Dfun=self.jacobian_wrapper,
+            scale_covar=True
+        )
+
+        # Run optimization
+        result = minimizer.minimize(method=method)
+
+        # Extract fitted parameters
+        fitted = FitParameters(
+            eps_inf=float(result.params['eps_inf'].value),
+            delta_eps=float(result.params['delta_eps'].value),
+            omega1=float(result.params['omega1'].value),
+            omega2=float(result.params['omega2'].value)
+        )
+
+        return fitted, result
+
+
+# ============================================================================
+# Evaluation and Reporting
+# ============================================================================
+
 class FitEvaluator:
-    """Evaluates the quality of a fit report based on configurable metrics."""
+    """Evaluates the quality of a fit report based on configurable metrics"""
+
     DEFAULT_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
         "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Revisit noise model or add a relaxation term."),
-        "rms_real":           (0.005, 0.010, 0.020, "Loosen bounds or refine initial ε_inf/Δε."),
-        "rms_imag":           (0.001, 0.002, 0.005, "Add extra pole or use a hybrid model for loss plateau."),
-        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias at low frequencies."),
+        "rms_real": (0.005, 0.010, 0.020, "Loosen bounds or refine initial ε_inf/Δε."),
+        "rms_imag": (0.001, 0.002, 0.005, "Add extra pole or use a hybrid model for loss plateau."),
+        "mean_residual": (1e-4, 5e-4, 1e-3, "Check for systematic bias at low frequencies."),
     }
 
     DEFAULT_WEIGHTS: Dict[str, int] = {
@@ -320,104 +579,44 @@ class FitEvaluator:
         self.thresholds = thresholds or FitEvaluator.DEFAULT_THRESHOLDS
         self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
 
-    @classmethod
-    def from_json_report(cls, json_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert JSON report format to evaluator format."""
-        fit_stats = json_data.get('fit_statistics', {})
-        residuals = json_data.get('residual_analysis', {})
-        corr_matrix = json_data.get('correlation_matrix', [])
+    def evaluate_from_fit_result(self, fit_data: FitData, params: FitParameters, result: Any) -> ReportEvaluation:
+        """Evaluate fit quality from optimization result"""
+        # Calculate residuals
+        model_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        real_residuals = np.real(model_epsilon) - np.real(fit_data.complex_eps)
+        imag_residuals = np.imag(model_epsilon) - np.imag(fit_data.complex_eps)
+
+        # Build report data
+        n_dat = len(real_residuals) + len(imag_residuals)
+        n_var = 4
+        chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+        red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+        # Extract correlations from fit result
         correlations = {}
-        if corr_matrix and isinstance(corr_matrix, list):
-            param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
-            try:
-                for i in range(len(corr_matrix)):
-                    for j in range(i+1, len(corr_matrix[0])):
-                        if abs(corr_matrix[i][j]) > 0.1:
-                            correlations[(param_names[i], param_names[j])] = corr_matrix[i][j]
-            except (IndexError, TypeError) as e:
-                logger.warning(f"Error parsing correlation matrix: {e}")
-        
-        return {
-            'n_data_points': fit_stats.get('n_data_points', 0),
-            'n_variables': fit_stats.get('n_variables', 4),
-            'reduced_chi_square': fit_stats.get('reduced_chi_square', 0),
-            'rms_real': residuals.get('real_part', {}).get('rms', 0),
-            'rms_imag': residuals.get('imaginary_part', {}).get('rms', 0),
-            'mean_real': residuals.get('real_part', {}).get('mean', 0),
-            'mean_imag': residuals.get('imaginary_part', {}).get('mean', 0),
+        if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
+            for i, name1 in enumerate(result.var_names):
+                for j, name2 in enumerate(result.var_names):
+                    if j > i:
+                        corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
+                        if abs(corr_val) > 0.1:
+                            correlations[(name1, name2)] = corr_val
+
+        report_data = {
+            'n_data_points': n_dat,
+            'n_variables': n_var,
+            'reduced_chi_square': red_chi_sqr,
+            'rms_real': float(np.sqrt(np.mean(real_residuals**2))),
+            'rms_imag': float(np.sqrt(np.mean(imag_residuals**2))),
+            'mean_real': float(np.mean(real_residuals)),
+            'mean_imag': float(np.mean(imag_residuals)),
             'correlations': correlations
         }
 
-    def _validate_report(self, report: Dict[str, Any]) -> None:
-        """Validate report data types and values."""
-        try:
-            n_data = int(report['n_data_points'])
-            n_vars = int(report['n_variables'])
-            if n_vars <= 0:
-                raise ValueError("n_variables must be positive")
-            if n_data <= n_vars:
-                raise ValueError("n_data_points must exceed n_variables")
-            numeric_fields = ['reduced_chi_square', 'rms_real', 'rms_imag', 'mean_real', 'mean_imag']
-            for field in numeric_fields:
-                val = report.get(field, 0)
-                if not isinstance(val, (int, float)) or math.isnan(val):
-                    raise ValueError(f"{field} must be a valid number")
-        except (TypeError, ValueError, KeyError) as e:
-            raise ValueError(f"Invalid report data: {e}")
-
-    def _validate_physical_bounds(self, report: Dict[str, Any]) -> List[str]:
-        """Check if values are physically reasonable."""
-        warnings = []
-        if report.get('rms_real', 0) > 1.0:
-            warnings.append("RMS real part unusually high - check data quality")
-        if report.get('rms_imag', 0) > 0.1:
-            warnings.append("RMS imaginary part very high - check loss data quality")
-        rcs = report.get('reduced_chi_square', 0)
-        if rcs < 1e-6 and rcs > 0:
-            warnings.append("Reduced chi-square suspiciously low - possible overfitting")
-        elif rcs > 1.0:
-            warnings.append("Reduced chi-square > 1 - model may be inadequate")
-        if report.get('rms_real', 0) < 0 or report.get('rms_imag', 0) < 0:
-            warnings.append("Negative RMS values detected - calculation error")
-        return warnings
-
-    def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
-        """Evaluates metrics where smaller values are better."""
-        godly_max, excellent_max, good_max = thresholds
-        if value < godly_max:
-            return 100, "Godly"
-        elif value < excellent_max:
-            return 80, "Excellent"
-        elif value < good_max:
-            return 60, "Good"
-        return 30, "Poor"
-
-    def _evaluate_inverse_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
-        """Evaluates metrics where larger values are better."""
-        poor_min, good_min, excellent_min = thresholds
-        if value >= excellent_min:
-            return 100, "Godly"
-        elif value >= good_min:
-            return 80, "Excellent"
-        elif value >= poor_min:
-            return 60, "Good"
-        return 30, "Poor"
-
-    def _evaluate_correlation(self, corr_value: float) -> Tuple[int, str, str | None]:
-        """Evaluates correlation, returning score, category, and suggestion."""
-        if not isinstance(corr_value, (int, float)) or math.isnan(corr_value):
-            return 30, "Invalid", "Check correlation calculation"
-        abs_corr = abs(corr_value)
-        if abs_corr < 0.50:
-            return 100, "Low", None
-        elif abs_corr < 0.80:
-            return 80, "Moderate", None
-        elif abs_corr < 0.95:
-            return 60, "High", "Inspect uncertainties; consider fixing one parameter."
-        return 30, "Very High", "Fix or remove one highly correlated parameter."
+        return self.evaluate(report_data)
 
     def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
-        """Validates and evaluates a fit report dictionary."""
+        """Validates and evaluates a fit report dictionary"""
         required = {
             'n_data_points', 'n_variables', 'reduced_chi_square',
             'rms_real', 'rms_imag', 'mean_real', 'mean_imag', 'correlations'
@@ -428,7 +627,7 @@ class FitEvaluator:
 
         self._validate_report(report)
         warnings = self._validate_physical_bounds(report)
-        
+
         metrics: Dict[str, MetricResult] = {}
         suggestions: List[str] = []
 
@@ -461,7 +660,7 @@ class FitEvaluator:
         else:
             worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
             corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
-        
+
         corr_result = MetricResult(
             'correlation', corr_score, corr_cat,
             worst_val, corr_sug, details={'pair': worst_pair}
@@ -473,11 +672,11 @@ class FitEvaluator:
         # Overall score
         total_weight = sum(self.weights.values())
         overall_score = sum(
-            metrics[k].score * self.weights.get(k, 1) 
-            for k in metrics.keys() 
+            metrics[k].score * self.weights.get(k, 1)
+            for k in metrics.keys()
             if k in self.weights
         ) / total_weight
-        
+
         if overall_score >= 90:
             overall_cat = "Godly"
         elif overall_score >= 75:
@@ -490,240 +689,103 @@ class FitEvaluator:
         overall = MetricResult("overall", round(overall_score, 1), overall_cat, round(overall_score, 1))
         return ReportEvaluation(metrics=metrics, overall=overall, suggestions=suggestions, warnings=warnings)
 
-# Global variables to store data
-global_f_ghz = None
-global_complex_epsilon = None
-global_correlation_matrix = None
-global_measured_dk = None
-global_measured_df = None
+    def _validate_report(self, report: Dict[str, Any]) -> None:
+        """Validate report data types and values"""
+        try:
+            n_data = int(report['n_data_points'])
+            n_vars = int(report['n_variables'])
+            if n_vars <= 0:
+                raise ValueError("n_variables must be positive")
+            if n_data <= n_vars:
+                raise ValueError("n_data_points must exceed n_variables")
+            numeric_fields = ['reduced_chi_square', 'rms_real', 'rms_imag', 'mean_real', 'mean_imag']
+            for field in numeric_fields:
+                val = report.get(field, 0)
+                if not isinstance(val, (int, float)) or math.isnan(val):
+                    raise ValueError(f"{field} must be a valid number")
+        except (TypeError, ValueError, KeyError) as e:
+            raise ValueError(f"Invalid report data: {e}")
 
-def load_data(csv_content):
-    global global_f_ghz, global_complex_epsilon
-    try:
-        data = pd.read_csv(io.StringIO(csv_content)).dropna()
-        f_ghz = data.iloc[:, 0].values
-        dk = data.iloc[:, 1].values
-        df = data.iloc[:, 2].values
-        complex_epsilon = dk - 1j * (dk * df)
-        global_f_ghz = f_ghz
-        global_complex_epsilon = complex_epsilon
-        return f_ghz, complex_epsilon
-    except Exception as e:
-        raise ValueError(f"Failed to parse CSV: {e}")
+    def _validate_physical_bounds(self, report: Dict[str, Any]) -> List[str]:
+        """Check if values are physically reasonable"""
+        warnings = []
+        if report.get('rms_real', 0) > 1.0:
+            warnings.append("RMS real part unusually high - check data quality")
+        if report.get('rms_imag', 0) > 0.1:
+            warnings.append("RMS imaginary part very high - check loss data quality")
+        rcs = report.get('reduced_chi_square', 0)
+        if rcs < 1e-6 and rcs > 0:
+            warnings.append("Reduced chi-square suspiciously low - possible overfitting")
+        elif rcs > 1.0:
+            warnings.append("Reduced chi-square > 1 - model may be inadequate")
+        if report.get('rms_real', 0) < 0 or report.get('rms_imag', 0) < 0:
+            warnings.append("Negative RMS values detected - calculation error")
+        return warnings
 
-def estimate_initial_parameters(f_ghz, complex_epsilon, pct=0.05):
-    """
-    Robust initial guess for a two‐cutoff Djordjevic–Sarkar model.
-    - f_ghz: 1D array of frequencies in GHz (unsorted OK)
-    - complex_epsilon: same‐shape complex permittivity values
-    - pct: fraction of points for averaging at ends
-    """
-    # sort
-    idx = np.argsort(f_ghz)
-    f = np.array(f_ghz)[idx]
-    eps = np.real(complex_epsilon)[idx]
-    df = np.imag(complex_epsilon)[idx]
+    def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
+        """Evaluates metrics where smaller values are better"""
+        godly_max, excellent_max, good_max = thresholds
+        if value < godly_max:
+            return 100, "Godly"
+        elif value < excellent_max:
+            return 80, "Excellent"
+        elif value < good_max:
+            return 60, "Good"
+        return 30, "Poor"
 
-    n = len(f)
-    k = max(1, int(n * pct))
-    eps_s = np.mean(eps[:k])        # static perm at low freq
-    eps_inf = np.mean(eps[-k:])     # high‐freq perm
-    delta_eps = max(eps_s - eps_inf, 1e-6)
+    def _evaluate_inverse_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
+        """Evaluates metrics where larger values are better"""
+        poor_min, good_min, excellent_min = thresholds
+        if value >= excellent_min:
+            return 100, "Godly"
+        elif value >= good_min:
+            return 80, "Excellent"
+        elif value >= poor_min:
+            return 60, "Good"
+        return 30, "Poor"
 
-    # find loss peak
-    peak_idx = np.argmax(np.abs(df))
-    f_peak = f[peak_idx]
+    def _evaluate_correlation(self, corr_value: float) -> Tuple[int, str, Optional[str]]:
+        """Evaluates correlation, returning score, category, and suggestion"""
+        if not isinstance(corr_value, (int, float)) or math.isnan(corr_value):
+            return 30, "Invalid", "Check correlation calculation"
+        abs_corr = abs(corr_value)
+        if abs_corr < 0.50:
+            return 100, "Low", None
+        elif abs_corr < 0.80:
+            return 80, "Moderate", None
+        elif abs_corr < 0.95:
+            return 60, "High", "Inspect uncertainties; consider fixing one parameter."
+        return 30, "Very High", "Fix or remove one highly correlated parameter."
 
-    f_low = max(f[0],  f_peak / 10)
-    f_high = min(f[-1], f_peak * 10)
 
-    # convert to rad/s
-    ω1 = 2 * np.pi * f_low  * 1e9
-    ω2 = 2 * np.pi * f_high * 1e9
+class ReportGenerator:
+    """Generates formatted reports"""
 
-    # safety clamping
-    if ω2 <= ω1:
-        ω2 = ω1 * 10
+    @staticmethod
+    def generate_text_report(fit_data: FitData, params: FitParameters, result: Any, evaluation: Optional[ReportEvaluation] = None) -> str:
+        """Generate a text report"""
+        # Calculate statistics
+        model_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        real_residuals = np.real(model_epsilon) - np.real(fit_data.complex_eps)
+        imag_residuals = np.imag(model_epsilon) - np.imag(fit_data.complex_eps)
 
-    return {
-        'eps_inf':    float(eps_inf),
-        'delta_eps':  float(delta_eps),
-        'omega1':     float(ω1),
-        'omega2':     float(ω2),
-    }
+        n_dat = len(real_residuals) + len(imag_residuals)
+        n_var = 4
+        chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+        red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
 
-def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
-    global global_f_ghz
-    if global_f_ghz is None:
-        return json.dumps({"error": "No data loaded"})
-    
-    f_ghz = global_f_ghz
-    omega = 2 * np.pi * f_ghz * 1e9
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        if omega2 <= 0 or omega1 <= 0 or omega2 <= omega1:
-            eps_prime = np.full_like(f_ghz, np.nan)
-            eps_double_prime = np.full_like(f_ghz, np.nan)
-        else:
-            log_term = np.log((omega2**2 + omega**2) / (omega1**2 + omega**2))
-            eps_prime = eps_inf + (delta_eps / (2 * np.log(omega2 / omega1))) * log_term
-            atan_term = np.arctan(omega / omega1) - np.arctan(omega / omega2)
-            eps_double_prime = -(delta_eps / np.log(omega2 / omega1)) * atan_term
-    
-    return json.dumps({
-        "eps_prime": eps_prime.tolist(),
-        "eps_double_prime": eps_double_prime.tolist()
-    })
+        # Extract correlations
+        correlations_str = ""
+        if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
+            correlations_str = "\\nCorrelations (from optimization):\\n"
+            for i, name1 in enumerate(result.var_names):
+                for j, name2 in enumerate(result.var_names):
+                    if j > i and result.covar is not None:
+                        corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
+                        if abs(corr_val) > 0.1:
+                            correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
 
-def calculate_model(params, f_ghz):
-    p = params
-    omega = 2 * np.pi * f_ghz * 1e9
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        if p['omega2'] <= 0 or p['omega1'] <= 0 or p['omega2'] <= p['omega1']:
-            eps_prime = np.full_like(f_ghz, np.nan)
-            eps_double_prime = np.full_like(f_ghz, np.nan)
-        else:
-            log_term = np.log((p['omega2']**2 + omega**2) / (p['omega1']**2 + omega**2))
-            eps_prime = p['eps_inf'] + (p['delta_eps'] / (2 * np.log(p['omega2'] / p['omega1']))) * log_term
-            atan_term = np.arctan(omega / p['omega1']) - np.arctan(omega / p['omega2'])
-            eps_double_prime = -(p['delta_eps'] / np.log(p['omega2'] / p['omega1'])) * atan_term
-    
-    return eps_prime + 1j * eps_double_prime
-
-def residual(params, f_ghz, complex_epsilon_data):
-    p_dict = params.valuesdict()
-    model_epsilon = calculate_model(p_dict, f_ghz)
-    
-    real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
-    imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
-    return np.concatenate([real_residual, imag_residual])
-
-def calculate_jacobian(params_dict, f_ghz, h=1e-8):
-    """Calculate Jacobian matrix using finite differences"""
-    param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
-    n_params = len(param_names)
-    n_data = len(f_ghz) * 2  # real and imag parts
-    
-    jacobian = np.zeros((n_data, n_params))
-    
-    # Base model
-    base_model = calculate_model(params_dict, f_ghz)
-    base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
-    
-    # Calculate derivatives
-    for i, param_name in enumerate(param_names):
-        params_plus = params_dict.copy()
-        params_plus[param_name] += h
-        
-        model_plus = calculate_model(params_plus, f_ghz)
-        residual_plus = np.concatenate([np.real(model_plus), np.imag(model_plus)])
-        
-        jacobian[:, i] = (residual_plus - base_residual) / h
-    
-    return jacobian
-
-def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
-    """Calculate correlation matrix from Jacobian"""
-    try:
-        # Calculate Jacobian
-        J = calculate_jacobian(params_dict, f_ghz)
-        
-        # Calculate covariance matrix: (J^T J)^-1
-        JTJ = np.dot(J.T, J)
-        
-        # Add small regularization to ensure positive definite
-        JTJ += np.eye(JTJ.shape[0]) * 1e-10
-        
-        # Calculate covariance
-        cov_matrix = np.linalg.inv(JTJ)
-        
-        # Convert to correlation matrix
-        std_devs = np.sqrt(np.diag(cov_matrix))
-        corr_matrix = np.zeros_like(cov_matrix)
-        
-        for i in range(len(std_devs)):
-            for j in range(len(std_devs)):
-                if std_devs[i] > 0 and std_devs[j] > 0:
-                    corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
-                else:
-                    corr_matrix[i, j] = 0
-        
-        return corr_matrix
-    except:
-        return None
-
-def format_correlation_matrix(corr_matrix):
-    """Format correlation matrix for display"""
-    if corr_matrix is None:
-        return "Unable to calculate correlation matrix"
-    
-    param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
-    result = "Correlations:\\n"
-    
-    for i, param1 in enumerate(param_names):
-        for j, param2 in enumerate(param_names):
-            if j > i:  # Only show upper triangle
-                correlation = corr_matrix[i, j]
-                if abs(correlation) > 0.1:  # Only show significant correlations
-                    result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
-    
-    return result
-
-def create_updated_report(eps_inf, delta_eps, omega1, omega2):
-    global global_f_ghz, global_complex_epsilon
-    if global_f_ghz is None:
-        return json.dumps({"error": "No data loaded"})
-
-    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
-    model_epsilon = calculate_model(params, global_f_ghz)
-    
-    real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
-    imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
-    n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 4
-    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
-    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-
-    # Calculate correlation matrix for current parameters
-    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
-    corr_text = format_correlation_matrix(corr_matrix)
-
-    # Create JSON data structure
-    json_data = {
-        "model": "Djordjevic-Sarkar",
-        "timestamp": datetime.now().isoformat(),
-        "parameters": {
-            "eps_inf": eps_inf,
-            "delta_eps": delta_eps,
-            "omega1": omega1,
-            "omega2": omega2,
-            "f1_ghz": omega1 / (2 * np.pi * 1e9),
-            "f2_ghz": omega2 / (2 * np.pi * 1e9)
-        },
-        "fit_statistics": {
-            "n_data_points": n_dat,
-            "n_variables": n_var,
-            "chi_square": chi_sqr,
-            "reduced_chi_square": red_chi_sqr
-        },
-        "residual_analysis": {
-            "real_part": {
-                "mean": float(np.mean(real_residuals)),
-                "std_dev": float(np.std(real_residuals)),
-                "rms": float(np.sqrt(np.mean(real_residuals**2)))
-            },
-            "imaginary_part": {
-                "mean": float(np.mean(imag_residuals)),
-                "std_dev": float(np.std(imag_residuals)),
-                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
-            }
-        },
-        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
-    }
-
-    report = f"""Djordjevic-Sarkar Fit Report
+        report = f"""Djordjevic-Sarkar Fit Report
 {'=' * 50}
 Date: {datetime.now()}
 
@@ -732,11 +794,11 @@ Model and Parameters
 ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
 ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
 
-Using current values (manual):
-    eps_inf   = {eps_inf:.4f}
-    delta_eps = {delta_eps:.4f}
-    omega1    = {omega1:.4e}
-    omega2    = {omega2:.4e}
+Fitted parameters:
+    eps_inf   = {params.eps_inf:.4f}
+    delta_eps = {params.delta_eps:.4f}
+    omega1    = {params.omega1:.4e} rad/s (f1 = {params.f1_ghz:.3f} GHz)
+    omega2    = {params.omega2:.4e} rad/s (f2 = {params.f2_ghz:.3f} GHz)
 
 Fit Statistics
     # data points = {n_dat}
@@ -754,200 +816,430 @@ Residual Analysis
         Std Dev: {np.std(imag_residuals):.4f}
         RMS: {np.sqrt(np.mean(imag_residuals**2)):.4f}
 
-{corr_text}
-"""
-    return json.dumps({"report": report, "json_data": json_data})
+{correlations_str}"""
 
+        if evaluation:
+            report += f"\\n\\nFit Quality Evaluation\\n{'-' * 50}\\n"
+            report += evaluation.to_markdown()
 
-def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
-    fig = make_subplots(rows=2, cols=1, subplot_titles=('Real Permittivity', 'Loss Tangent'))
-    fig.add_trace(go.Scatter(x=f_ghz, y=np.real(measured_eps), mode='markers', name='Measured Dk', marker=dict(color='black')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=f_ghz, y=np.real(fitted_eps), mode='lines', name='Fitted Dk', line=dict(color='red')), row=1, col=1)
-    measured_df = -np.imag(measured_eps) / np.real(measured_eps)
-    fitted_df = -np.imag(fitted_eps) / np.real(fitted_eps)
-    fig.add_trace(go.Scatter(x=f_ghz, y=measured_df, mode='markers', name='Measured Df', marker=dict(color='black'), showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=f_ghz, y=fitted_df, mode='lines', name='Fitted Df', line=dict(color='red'), showlegend=False), row=2, col=1)
-    fig.update_xaxes(title_text="Frequency (GHz)", row=1, col=1)
-    fig.update_yaxes(title_text="Dielectric Constant (Dk)", row=1, col=1)
-    fig.update_xaxes(title_text="Frequency (GHz)", row=2, col=1)
-    fig.update_yaxes(title_text="Dissipation Factor (Df)", row=2, col=1)
-    fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), template="plotly_white", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99))
-    return pio.to_json(fig)
+        return report
 
-def get_measured_data():
-    """Return the stored measured data"""
-    global global_measured_dk, global_measured_df
-    return json.dumps({
-        "measured_dk": global_measured_dk if global_measured_dk is not None else [],
-        "measured_df": global_measured_df if global_measured_df is not None else []
-    })
+    @staticmethod
+    def generate_json_report(fit_data: FitData, params: FitParameters, result: Any, evaluation: Optional[ReportEvaluation] = None) -> Dict[str, Any]:
+        """Generate a JSON report"""
+        # Calculate statistics
+        model_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        real_residuals = np.real(model_epsilon) - np.real(fit_data.complex_eps)
+        imag_residuals = np.imag(model_epsilon) - np.imag(fit_data.complex_eps)
 
-def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
-    """Evaluate the current fit quality and return evaluation results."""
-    global global_f_ghz, global_complex_epsilon
-    if global_f_ghz is None:
-        return json.dumps({"error": "No data loaded"})
-    
-    # Get current report data
-    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
-    model_epsilon = calculate_model(params, global_f_ghz)
-    
-    real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
-    imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
-    n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 4
-    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
-    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-    
-    # Calculate correlation matrix
-    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
-    
-    # Create JSON report format
-    json_report = {
-        "model": "Djordjevic-Sarkar",
-        "timestamp": datetime.now().isoformat(),
-        "parameters": {
-            "eps_inf": eps_inf,
-            "delta_eps": delta_eps,
-            "omega1": omega1,
-            "omega2": omega2,
-            "f1_ghz": omega1 / (2 * np.pi * 1e9),
-            "f2_ghz": omega2 / (2 * np.pi * 1e9)
-        },
-        "fit_statistics": {
-            "n_data_points": n_dat,
-            "n_variables": n_var,
-            "chi_square": chi_sqr,
-            "reduced_chi_square": red_chi_sqr
-        },
-        "residual_analysis": {
-            "real_part": {
-                "mean": float(np.mean(real_residuals)),
-                "std_dev": float(np.std(real_residuals)),
-                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+        n_dat = len(real_residuals) + len(imag_residuals)
+        n_var = 4
+        chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+        red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+        # Extract correlation matrix
+        corr_matrix = None
+        if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
+            n_params = len(result.var_names)
+            corr_matrix = np.zeros((n_params, n_params))
+            for i in range(n_params):
+                for j in range(n_params):
+                    if result.covar[i, i] > 0 and result.covar[j, j] > 0:
+                        corr_matrix[i, j] = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
+
+        json_report = {
+            "model": "Djordjevic-Sarkar",
+            "timestamp": datetime.now().isoformat(),
+            "parameters": {
+                "eps_inf": params.eps_inf,
+                "delta_eps": params.delta_eps,
+                "omega1": params.omega1,
+                "omega2": params.omega2,
+                "f1_ghz": params.f1_ghz,
+                "f2_ghz": params.f2_ghz
             },
-            "imaginary_part": {
-                "mean": float(np.mean(imag_residuals)),
-                "std_dev": float(np.std(imag_residuals)),
-                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            "fit_statistics": {
+                "n_data_points": n_dat,
+                "n_variables": n_var,
+                "chi_square": chi_sqr,
+                "reduced_chi_square": red_chi_sqr
+            },
+            "residual_analysis": {
+                "real_part": {
+                    "mean": float(np.mean(real_residuals)),
+                    "std_dev": float(np.std(real_residuals)),
+                    "rms": float(np.sqrt(np.mean(real_residuals**2)))
+                },
+                "imaginary_part": {
+                    "mean": float(np.mean(imag_residuals)),
+                    "std_dev": float(np.std(imag_residuals)),
+                    "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+                }
+            },
+            "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+        }
+
+        if evaluation:
+            json_report['evaluation'] = evaluation.to_dict()
+
+        return json_report
+
+
+# ============================================================================
+# Plotting
+# ============================================================================
+
+class Plotter:
+    """Handles all plotting functionality"""
+
+    @staticmethod
+    def create_plotly_plot(fit_data: FitData, params: FitParameters) -> str:
+        """Create interactive Plotly plot"""
+        # Calculate fitted model
+        fitted_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+
+        # Create subplots
+        fig = make_subplots(rows=2, cols=1, subplot_titles=('Real Permittivity', 'Loss Tangent'))
+
+        # Real part
+        fig.add_trace(
+            go.Scatter(
+                x=fit_data.f_ghz,
+                y=np.real(fit_data.complex_eps),
+                mode='markers',
+                name='Measured Dk',
+                marker=dict(color='black')
+            ),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=fit_data.f_ghz,
+                y=np.real(fitted_epsilon),
+                mode='lines',
+                name='Fitted Dk',
+                line=dict(color='red')
+            ),
+            row=1, col=1
+        )
+
+        # Loss tangent
+        measured_df = -np.imag(fit_data.complex_eps) / np.real(fit_data.complex_eps)
+        fitted_df = -np.imag(fitted_epsilon) / np.real(fitted_epsilon)
+
+        fig.add_trace(
+            go.Scatter(
+                x=fit_data.f_ghz,
+                y=measured_df,
+                mode='markers',
+                name='Measured Df',
+                marker=dict(color='black'),
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=fit_data.f_ghz,
+                y=fitted_df,
+                mode='lines',
+                name='Fitted Df',
+                line=dict(color='red'),
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+
+        # Update layout
+        fig.update_xaxes(title_text="Frequency (GHz)", row=1, col=1)
+        fig.update_yaxes(title_text="Dielectric Constant (Dk)", row=1, col=1)
+        fig.update_xaxes(title_text="Frequency (GHz)", row=2, col=1)
+        fig.update_yaxes(title_text="Dissipation Factor (Df)", row=2, col=1)
+
+        fig.update_layout(
+            height=600,
+            margin=dict(l=20, r=20, t=40, b=20),
+            template="plotly_white",
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+        )
+
+        return pio.to_json(fig)
+
+    @staticmethod
+    def create_matplotlib_plot(fit_data: FitData, params: FitParameters) -> bytes:
+        """Create downloadable matplotlib plot"""
+        # Calculate fitted model
+        fitted_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+
+        # Real part
+        ax1.plot(fit_data.f_ghz, np.real(fit_data.complex_eps), 'ko', label='Measured')
+        ax1.plot(fit_data.f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
+        ax1.set_xlabel('Frequency (GHz)')
+        ax1.set_ylabel('Dielectric Constant (Dk)')
+        ax1.set_title('Real Permittivity')
+        ax1.legend()
+        ax1.grid(True, alpha=0.5)
+
+        # Loss tangent
+        measured_df = -np.imag(fit_data.complex_eps) / np.real(fit_data.complex_eps)
+        fitted_df = -np.imag(fitted_epsilon) / np.real(fitted_epsilon)
+
+        ax2.plot(fit_data.f_ghz, measured_df, 'ko', label='Measured')
+        ax2.plot(fit_data.f_ghz, fitted_df, 'r-', lw=2, label='Fitted')
+        ax2.set_xlabel('Frequency (GHz)')
+        ax2.set_ylabel('Dissipation Factor (Df)')
+        ax2.set_title('Loss Tangent')
+        ax2.legend()
+        ax2.grid(True, alpha=0.5)
+
+        plt.tight_layout()
+
+        # Save to bytes
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+
+
+# ============================================================================
+# Main API Functions
+# ============================================================================
+
+class DjordjevicSarkarFitter:
+    """Main class that orchestrates the fitting process"""
+
+    def __init__(self):
+        self.fit_data: Optional[FitData] = None
+        self.current_params: Optional[FitParameters] = None
+        self.last_result: Optional[Any] = None
+
+    def load_data(self, csv_content: str) -> Dict[str, Any]:
+        """Load data from CSV"""
+        try:
+            self.fit_data = DataLoader.load_from_csv(csv_content)
+            return {
+                "success": True,
+                "message": "Data loaded successfully",
+                "n_points": len(self.fit_data.f_ghz)
             }
-        },
-        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
-    }
-    
-    # Evaluate the fit
-    try:
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def run_analysis(self, method: str = 'leastsq') -> Dict[str, Any]:
+        """Run the full analysis pipeline"""
+        if self.fit_data is None:
+            return {"error": "No data loaded"}
+
+        try:
+            # Run optimization
+            optimizer = Optimizer(self.fit_data)
+            self.current_params, self.last_result = optimizer.optimize(method)
+
+            # Evaluate fit
+            evaluator = FitEvaluator()
+            evaluation = evaluator.evaluate_from_fit_result(
+                self.fit_data,
+                self.current_params,
+                self.last_result
+            )
+
+            # Generate reports
+            text_report = ReportGenerator.generate_text_report(
+                self.fit_data,
+                self.current_params,
+                self.last_result,
+                evaluation
+            )
+            json_report = ReportGenerator.generate_json_report(
+                self.fit_data,
+                self.current_params,
+                self.last_result,
+                evaluation
+            )
+
+            # Create plot
+            plot_json = Plotter.create_plotly_plot(self.fit_data, self.current_params)
+
+            return {
+                "report": text_report,
+                "json_data": json_report,
+                "plot_json": plot_json,
+                "fitted_params": self.current_params.to_dict(),
+                "f_ghz": self.fit_data.f_ghz.tolist(),
+                "measured_dk": self.fit_data.measured_dk,
+                "measured_df": self.fit_data.measured_df
+            }
+
+        except Exception as e:
+            logger.error(f"Analysis failed: {e}")
+            return {"error": str(e)}
+
+    def calculate_model_from_params(self, eps_inf: float, delta_eps: float,
+                                   omega1: float, omega2: float) -> Dict[str, Any]:
+        """Calculate model response for given parameters"""
+        if self.fit_data is None:
+            return {"error": "No data loaded"}
+
+        params = {
+            'eps_inf': eps_inf,
+            'delta_eps': delta_eps,
+            'omega1': omega1,
+            'omega2': omega2
+        }
+
+        model_epsilon = DjordjevicSarkarModel.calculate(params, self.fit_data.f_ghz)
+
+        return {
+            "eps_prime": np.real(model_epsilon).tolist(),
+            "eps_double_prime": np.imag(model_epsilon).tolist()
+        }
+
+    def create_updated_report(self, eps_inf: float, delta_eps: float,
+                            omega1: float, omega2: float) -> Dict[str, Any]:
+        """Create a report for manually adjusted parameters"""
+        if self.fit_data is None:
+            return {"error": "No data loaded"}
+
+        # Create parameter object
+        params = FitParameters(eps_inf, delta_eps, omega1, omega2)
+
+        # Create a dummy result object for report generation
+        class DummyResult:
+            var_names = None
+            covar = None
+
+        dummy_result = DummyResult()
+
+        # Generate reports
+        text_report = ReportGenerator.generate_text_report(
+            self.fit_data,
+            params,
+            dummy_result
+        )
+        json_report = ReportGenerator.generate_json_report(
+            self.fit_data,
+            params,
+            dummy_result
+        )
+
+        return {
+            "report": text_report,
+            "json_data": json_report
+        }
+
+    def evaluate_current_fit(self, eps_inf: float, delta_eps: float,
+                           omega1: float, omega2: float) -> Dict[str, Any]:
+        """Evaluate the quality of current parameters"""
+        if self.fit_data is None:
+            return {"error": "No data loaded"}
+
+        params = FitParameters(eps_inf, delta_eps, omega1, omega2)
+
+        # Use last result if available, otherwise create dummy
+        result = self.last_result if self.last_result is not None else type('obj', (object,), {'var_names': None, 'covar': None})
+
+        # Evaluate
         evaluator = FitEvaluator()
-        report_data = FitEvaluator.from_json_report(json_report)
-        evaluation = evaluator.evaluate(report_data)
-        json_report['evaluation'] = evaluation.to_dict()
+        evaluation = evaluator.evaluate_from_fit_result(self.fit_data, params, result)
+
+        # Generate JSON report
+        json_report = ReportGenerator.generate_json_report(
+            self.fit_data,
+            params,
+            result,
+            evaluation
+        )
+
+        return json_report
+
+    def create_downloadable_plot(self, eps_inf: float, delta_eps: float,
+                               omega1: float, omega2: float) -> Optional[bytes]:
+        """Create a downloadable PNG plot"""
+        if self.fit_data is None:
+            return None
+
+        params = FitParameters(eps_inf, delta_eps, omega1, omega2)
+        return Plotter.create_matplotlib_plot(self.fit_data, params)
+
+    def get_measured_data(self) -> Dict[str, Any]:
+        """Return the stored measured data"""
+        if self.fit_data is None:
+            return {
+                "measured_dk": [],
+                "measured_df": []
+            }
+
+        return {
+            "measured_dk": self.fit_data.measured_dk,
+            "measured_df": self.fit_data.measured_df
+        }
+
+
+# ============================================================================
+# Wrapper functions for backward compatibility
+# ============================================================================
+
+# Create a global fitter instance
+_fitter = DjordjevicSarkarFitter()
+
+def load_data(csv_content: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Legacy wrapper for data loading"""
+    result = _fitter.load_data(csv_content)
+    if result.get("success"):
+        return _fitter.fit_data.f_ghz, _fitter.fit_data.complex_eps
+    else:
+        raise ValueError(result.get("error", "Unknown error"))
+
+def run_analysis(csv_content: str, method: str = 'leastsq') -> str:
+    """Legacy wrapper for running analysis"""
+    try:
+        load_result = _fitter.load_data(csv_content)
+        if not load_result.get("success"):
+            return json.dumps({"error": load_result.get("error", "Failed to load data")})
+        result = _fitter.run_analysis(method)
+        return json.dumps(result)
     except Exception as e:
-        logger.warning(f"Could not evaluate fit: {e}")
-        json_report['evaluation'] = None
-    
-    return json.dumps(json_report)
+        return json.dumps({"error": str(e)})
 
-def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
-    global global_f_ghz, global_complex_epsilon
-    if global_f_ghz is None:
-        return None
+def calculate_model_from_params(eps_inf: float, delta_eps: float,
+                               omega1: float, omega2: float) -> str:
+    """Legacy wrapper for model calculation"""
+    result = _fitter.calculate_model_from_params(eps_inf, delta_eps, omega1, omega2)
+    return json.dumps(result)
 
-    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
-    fitted_epsilon = calculate_model(params, global_f_ghz)
-    
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-    
-    ax1.plot(global_f_ghz, np.real(global_complex_epsilon), 'ko', label='Measured')
-    ax1.plot(global_f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
-    ax1.set_xlabel('Frequency (GHz)')
-    ax1.set_ylabel('Dielectric Constant (Dk)')
-    ax1.set_title('Real Permittivity')
-    ax1.legend()
-    ax1.grid(True, alpha=0.5)
+def create_updated_report(eps_inf: float, delta_eps: float,
+                         omega1: float, omega2: float) -> str:
+    """Legacy wrapper for report creation"""
+    result = _fitter.create_updated_report(eps_inf, delta_eps, omega1, omega2)
+    return json.dumps(result)
 
-    measured_df = -np.imag(global_complex_epsilon) / np.real(global_complex_epsilon)
-    fitted_df = -np.imag(fitted_epsilon) / np.real(fitted_epsilon)
-    ax2.plot(global_f_ghz, measured_df, 'ko', label='Measured')
-    ax2.plot(global_f_ghz, fitted_df, 'r-', lw=2, label='Fitted')
-    ax2.set_xlabel('Frequency (GHz)')
-    ax2.set_ylabel('Dissipation Factor (Df)')
-    ax2.set_title('Loss Tangent')
-    ax2.legend()
-    ax2.grid(True, alpha=0.5)
+def evaluate_current_fit(eps_inf: float, delta_eps: float,
+                        omega1: float, omega2: float) -> str:
+    """Legacy wrapper for fit evaluation"""
+    result = _fitter.evaluate_current_fit(eps_inf, delta_eps, omega1, omega2)
+    return json.dumps(result)
 
-    plt.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+def create_downloadable_plot(eps_inf: float, delta_eps: float,
+                           omega1: float, omega2: float) -> Optional[bytes]:
+    """Legacy wrapper for plot creation"""
+    return _fitter.create_downloadable_plot(eps_inf, delta_eps, omega1, omega2)
 
-def run_analysis(csv_content, method):
-    global global_f_ghz, global_complex_epsilon, global_correlation_matrix, global_measured_dk, global_measured_df
-    f_ghz, complex_epsilon_data = load_data(csv_content)
-    
-    # Store measured data globally
-    global_measured_dk = np.real(complex_epsilon_data).tolist()
-    global_measured_df = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
-    
-    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data)
-    params = Parameters()
-    dk_data = np.real(complex_epsilon_data)
-    params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
-    params.add('delta_eps', value=initial_params['delta_eps'], min=0, max=10)
-    omega1_min_rad = 2 * np.pi * 0.1e9
-    omega2_max_rad = 2 * np.pi * 1500e9
-    params.add('omega1', value=initial_params['omega1'], min=omega1_min_rad, max=omega2_max_rad)
-    params.add('omega2', value=initial_params['omega2'], min=omega1_min_rad, max=omega2_max_rad)
-    
-    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data))
-    result = minimizer.minimize(method=method)
-    
-    fit_params = {p: float(v.value) for p, v in result.params.items()}
-    
-    # Extract correlation matrix from fit result
-    correlations_str = ""
-    if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
-        global_correlation_matrix = result.covar
-        correlations_str = "\\nCorrelations (from optimization):\\n"
-        for i, name1 in enumerate(result.var_names):
-            for j, name2 in enumerate(result.var_names):
-                if j > i:
-                    corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
-                    if abs(corr_val) > 0.1:
-                        correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
-    
-    report_content = fit_report(result).replace('[[', '').replace(']]', '')
-    
-    model_section = f"""Model and Parameters
---------------------------------------------------
-ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
-ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
+def get_measured_data() -> str:
+    """Legacy wrapper for getting measured data"""
+    result = _fitter.get_measured_data()
+    return json.dumps(result)
 
-Using fitted values:
-    eps_inf   = {fit_params['eps_inf']:.4f}
-    delta_eps = {fit_params['delta_eps']:.4f}
-    omega1    = {fit_params['omega1']:.4e}
-    omega2    = {fit_params['omega2']:.4e}
-"""
-    
-    full_report = f"Djordjevic-Sarkar Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{report_content}"
-    
-    fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
-    plot_json = create_plotly_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
-    
-    return_data = {
-        "report": full_report,
-        "plot_json": plot_json,
-        "f_ghz": f_ghz.tolist(),
-        "fitted_params": fit_params,
-        "correlations": correlations_str,
-        "measured_dk": global_measured_dk,
-        "measured_df": global_measured_df
-    }
-    return json.dumps(return_data)
+def estimate_initial_parameters(f_ghz: np.ndarray, complex_epsilon: np.ndarray, pct: float = 0.05) -> Dict[str, float]:
+    """Legacy wrapper for initial parameter estimation"""
+    fit_data = FitData(f_ghz, complex_epsilon)
+    params = DjordjevicSarkarModel.estimate_initial_parameters(fit_data, pct)
+    return params.to_dict()
 `;
 
         async function main() {
