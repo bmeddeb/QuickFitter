@@ -127,6 +127,18 @@
                                 </button>
                             </div>
                         </div>
+                        
+                        <!-- Fit Quality Indicator -->
+                        <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm font-medium">Fit Quality:</span>
+                                <span id="fit-quality-score" class="text-lg font-bold"></span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                                <div id="fit-quality-bar" class="h-2 rounded-full transition-all duration-300"></div>
+                            </div>
+                        </div>
+                        
                         <div class="space-y-6">
                             <!-- eps_inf -->
                             <div>
@@ -221,6 +233,262 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.io as pio
 from lmfit import Minimizer, Parameters, fit_report
+import math
+import logging
+from typing import Dict, Tuple, Any, List, Optional
+from dataclasses import dataclass, field
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Fit Evaluator Classes
+@dataclass
+class MetricResult:
+    """Stores the evaluation result for a single metric."""
+    name: str
+    score: float
+    category: str
+    value: float
+    suggestion: str | None = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class ReportEvaluation:
+    """Stores the full evaluation for a report."""
+    metrics: Dict[str, MetricResult]
+    overall: MetricResult
+    suggestions: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    def to_markdown(self) -> str:
+        """Return the evaluation as a markdown-formatted table."""
+        headers = ["Metric", "Score", "Category", "Value", "Suggestion"]
+        lines = ["| " + " | ".join(headers) + " |",
+                 "| " + " | ".join(["---"]*len(headers)) + " |"]
+        for m in self.metrics.values():
+            suggestion = m.suggestion or ""
+            lines.append(f"| {m.name} | {m.score} | {m.category} | {m.value:.4g} | {suggestion} |")
+        lines.append(
+            f"| **Overall** | {self.overall.score} | {self.overall.category} | {self.overall.value} |  |"
+        )
+        if self.warnings:
+            lines.append("\\n**Warnings:**")
+            for warning in self.warnings:
+                lines.append(f"- {warning}")
+        return "\\n".join(lines)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert evaluation to dictionary format."""
+        return {
+            'overall_score': self.overall.score,
+            'overall_category': self.overall.category,
+            'metrics': {
+                k: {
+                    'score': v.score, 
+                    'category': v.category, 
+                    'value': v.value,
+                    'suggestion': v.suggestion,
+                    'details': v.details
+                } 
+                for k, v in self.metrics.items()
+            },
+            'suggestions': self.suggestions,
+            'warnings': self.warnings,
+            'markdown_table': self.to_markdown()
+        }
+
+class FitEvaluator:
+    """Evaluates the quality of a fit report based on configurable metrics."""
+    DEFAULT_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
+        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Revisit noise model or add a relaxation term."),
+        "rms_real":           (0.005, 0.010, 0.020, "Loosen bounds or refine initial ε_inf/Δε."),
+        "rms_imag":           (0.001, 0.002, 0.005, "Add extra pole or use a hybrid model for loss plateau."),
+        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias at low frequencies."),
+    }
+
+    DEFAULT_WEIGHTS: Dict[str, int] = {
+        'dpv': 1,
+        'reduced_chi_square': 3,
+        'rms_real': 2,
+        'rms_imag': 2,
+        'mean_residual': 1,
+        'correlation': 2
+    }
+
+    def __init__(self, thresholds=None, weights=None):
+        self.thresholds = thresholds or FitEvaluator.DEFAULT_THRESHOLDS
+        self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
+
+    @classmethod
+    def from_json_report(cls, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert JSON report format to evaluator format."""
+        fit_stats = json_data.get('fit_statistics', {})
+        residuals = json_data.get('residual_analysis', {})
+        corr_matrix = json_data.get('correlation_matrix', [])
+        correlations = {}
+        if corr_matrix and isinstance(corr_matrix, list):
+            param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
+            try:
+                for i in range(len(corr_matrix)):
+                    for j in range(i+1, len(corr_matrix[0])):
+                        if abs(corr_matrix[i][j]) > 0.1:
+                            correlations[(param_names[i], param_names[j])] = corr_matrix[i][j]
+            except (IndexError, TypeError) as e:
+                logger.warning(f"Error parsing correlation matrix: {e}")
+        
+        return {
+            'n_data_points': fit_stats.get('n_data_points', 0),
+            'n_variables': fit_stats.get('n_variables', 4),
+            'reduced_chi_square': fit_stats.get('reduced_chi_square', 0),
+            'rms_real': residuals.get('real_part', {}).get('rms', 0),
+            'rms_imag': residuals.get('imaginary_part', {}).get('rms', 0),
+            'mean_real': residuals.get('real_part', {}).get('mean', 0),
+            'mean_imag': residuals.get('imaginary_part', {}).get('mean', 0),
+            'correlations': correlations
+        }
+
+    def _validate_report(self, report: Dict[str, Any]) -> None:
+        """Validate report data types and values."""
+        try:
+            n_data = int(report['n_data_points'])
+            n_vars = int(report['n_variables'])
+            if n_vars <= 0:
+                raise ValueError("n_variables must be positive")
+            if n_data <= n_vars:
+                raise ValueError("n_data_points must exceed n_variables")
+            numeric_fields = ['reduced_chi_square', 'rms_real', 'rms_imag', 'mean_real', 'mean_imag']
+            for field in numeric_fields:
+                val = report.get(field, 0)
+                if not isinstance(val, (int, float)) or math.isnan(val):
+                    raise ValueError(f"{field} must be a valid number")
+        except (TypeError, ValueError, KeyError) as e:
+            raise ValueError(f"Invalid report data: {e}")
+
+    def _validate_physical_bounds(self, report: Dict[str, Any]) -> List[str]:
+        """Check if values are physically reasonable."""
+        warnings = []
+        if report.get('rms_real', 0) > 1.0:
+            warnings.append("RMS real part unusually high - check data quality")
+        if report.get('rms_imag', 0) > 0.1:
+            warnings.append("RMS imaginary part very high - check loss data quality")
+        rcs = report.get('reduced_chi_square', 0)
+        if rcs < 1e-6 and rcs > 0:
+            warnings.append("Reduced chi-square suspiciously low - possible overfitting")
+        elif rcs > 1.0:
+            warnings.append("Reduced chi-square > 1 - model may be inadequate")
+        if report.get('rms_real', 0) < 0 or report.get('rms_imag', 0) < 0:
+            warnings.append("Negative RMS values detected - calculation error")
+        return warnings
+
+    def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
+        """Evaluates metrics where smaller values are better."""
+        godly_max, excellent_max, good_max = thresholds
+        if value < godly_max:
+            return 100, "Godly"
+        elif value < excellent_max:
+            return 80, "Excellent"
+        elif value < good_max:
+            return 60, "Good"
+        return 30, "Poor"
+
+    def _evaluate_inverse_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
+        """Evaluates metrics where larger values are better."""
+        poor_min, good_min, excellent_min = thresholds
+        if value >= excellent_min:
+            return 100, "Godly"
+        elif value >= good_min:
+            return 80, "Excellent"
+        elif value >= poor_min:
+            return 60, "Good"
+        return 30, "Poor"
+
+    def _evaluate_correlation(self, corr_value: float) -> Tuple[int, str, str | None]:
+        """Evaluates correlation, returning score, category, and suggestion."""
+        if not isinstance(corr_value, (int, float)) or math.isnan(corr_value):
+            return 30, "Invalid", "Check correlation calculation"
+        abs_corr = abs(corr_value)
+        if abs_corr < 0.50:
+            return 100, "Low", None
+        elif abs_corr < 0.80:
+            return 80, "Moderate", None
+        elif abs_corr < 0.95:
+            return 60, "High", "Inspect uncertainties; consider fixing one parameter."
+        return 30, "Very High", "Fix or remove one highly correlated parameter."
+
+    def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
+        """Validates and evaluates a fit report dictionary."""
+        required = {
+            'n_data_points', 'n_variables', 'reduced_chi_square',
+            'rms_real', 'rms_imag', 'mean_real', 'mean_imag', 'correlations'
+        }
+        missing = required - report.keys()
+        if missing:
+            raise KeyError(f"Missing required report fields: {missing}")
+
+        self._validate_report(report)
+        warnings = self._validate_physical_bounds(report)
+        
+        metrics: Dict[str, MetricResult] = {}
+        suggestions: List[str] = []
+
+        mean_res = max(abs(report['mean_real']), abs(report['mean_imag']))
+        report_vals = dict(report)
+        report_vals['mean_residual'] = mean_res
+
+        # Data-points-per-variable
+        dpv = report['n_data_points'] / report['n_variables']
+        dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
+        dpv_sug = "Collect more data or simplify model." if dpv_cat == "Poor" else None
+        metrics['dpv'] = MetricResult('dpv', dpv_score, dpv_cat, dpv, dpv_sug)
+        if dpv_sug:
+            suggestions.append(dpv_sug)
+
+        # Scalar metrics
+        for name, (g, e, gd, sug) in self.thresholds.items():
+            val = report_vals.get(name, 0)
+            sc, cat = self._evaluate_scalar(val, (g, e, gd))
+            sugg = sug if cat == "Poor" else None
+            metrics[name] = MetricResult(name, sc, cat, val, sugg)
+            if sugg:
+                suggestions.append(sugg)
+
+        # Correlation
+        corrs = report['correlations']
+        if not corrs:
+            corr_score, corr_cat, corr_sug = 100, "Low", None
+            worst_pair, worst_val = None, 0.0
+        else:
+            worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
+            corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
+        
+        corr_result = MetricResult(
+            'correlation', corr_score, corr_cat,
+            worst_val, corr_sug, details={'pair': worst_pair}
+        )
+        metrics['correlation'] = corr_result
+        if corr_sug:
+            suggestions.append(corr_sug)
+
+        # Overall score
+        total_weight = sum(self.weights.values())
+        overall_score = sum(
+            metrics[k].score * self.weights.get(k, 1) 
+            for k in metrics.keys() 
+            if k in self.weights
+        ) / total_weight
+        
+        if overall_score >= 90:
+            overall_cat = "Godly"
+        elif overall_score >= 75:
+            overall_cat = "Excellent"
+        elif overall_score >= 60:
+            overall_cat = "Good"
+        else:
+            overall_cat = "Poor"
+
+        overall = MetricResult("overall", round(overall_score, 1), overall_cat, round(overall_score, 1))
+        return ReportEvaluation(metrics=metrics, overall=overall, suggestions=suggestions, warnings=warnings)
 
 # Global variables to store data
 global_f_ghz = None
@@ -488,6 +756,72 @@ def get_measured_data():
         "measured_df": global_measured_df if global_measured_df is not None else []
     })
 
+def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
+    """Evaluate the current fit quality and return evaluation results."""
+    global global_f_ghz, global_complex_epsilon
+    if global_f_ghz is None:
+        return json.dumps({"error": "No data loaded"})
+    
+    # Get current report data
+    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
+    model_epsilon = calculate_model(params, global_f_ghz)
+    
+    real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
+    imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
+    
+    n_dat = len(real_residuals) + len(imag_residuals)
+    n_var = 4
+    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+    
+    # Calculate correlation matrix
+    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
+    
+    # Create JSON report format
+    json_report = {
+        "model": "Djordjevic-Sarkar",
+        "timestamp": datetime.now().isoformat(),
+        "parameters": {
+            "eps_inf": eps_inf,
+            "delta_eps": delta_eps,
+            "omega1": omega1,
+            "omega2": omega2,
+            "f1_ghz": omega1 / (2 * np.pi * 1e9),
+            "f2_ghz": omega2 / (2 * np.pi * 1e9)
+        },
+        "fit_statistics": {
+            "n_data_points": n_dat,
+            "n_variables": n_var,
+            "chi_square": chi_sqr,
+            "reduced_chi_square": red_chi_sqr
+        },
+        "residual_analysis": {
+            "real_part": {
+                "mean": float(np.mean(real_residuals)),
+                "std_dev": float(np.std(real_residuals)),
+                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+            },
+            "imaginary_part": {
+                "mean": float(np.mean(imag_residuals)),
+                "std_dev": float(np.std(imag_residuals)),
+                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            }
+        },
+        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+    }
+    
+    # Evaluate the fit
+    try:
+        evaluator = FitEvaluator()
+        report_data = FitEvaluator.from_json_report(json_report)
+        evaluation = evaluator.evaluate(report_data)
+        json_report['evaluation'] = evaluation.to_dict()
+    except Exception as e:
+        logger.warning(f"Could not evaluate fit: {e}")
+        json_report['evaluation'] = None
+    
+    return json.dumps(json_report)
+
 def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
     global global_f_ghz, global_complex_epsilon
     if global_f_ghz is None:
@@ -702,8 +1036,51 @@ Using fitted values:
                 const reportData = JSON.parse(reportJson);
                 reportOutput.textContent = reportData.report;
                 
+                // Update fit quality indicator
+                const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
+                const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
+                const evaluationData = JSON.parse(evaluationJson);
+                
+                if (evaluationData.evaluation) {
+                    updateFitQualityIndicator(evaluationData.evaluation);
+                }
+                
             } catch (err) {
                 console.error('Error updating UI:', err);
+            }
+        }
+        
+        function updateFitQualityIndicator(evaluation) {
+            const indicator = document.getElementById('fit-quality-indicator');
+            const scoreSpan = document.getElementById('fit-quality-score');
+            const bar = document.getElementById('fit-quality-bar');
+            
+            if (!evaluation) {
+                indicator.classList.add('hidden');
+                return;
+            }
+            
+            indicator.classList.remove('hidden');
+            const score = evaluation.overall_score;
+            const category = evaluation.overall_category;
+            
+            scoreSpan.textContent = `${score} (${category})`;
+            
+            // Update bar width and color
+            bar.style.width = `${score}%`;
+            
+            if (score >= 90) {
+                bar.className = 'h-2 rounded-full transition-all duration-300 bg-green-500';
+                indicator.className = 'mb-4 p-3 rounded-lg bg-green-50 border border-green-200';
+            } else if (score >= 75) {
+                bar.className = 'h-2 rounded-full transition-all duration-300 bg-blue-500';
+                indicator.className = 'mb-4 p-3 rounded-lg bg-blue-50 border border-blue-200';
+            } else if (score >= 60) {
+                bar.className = 'h-2 rounded-full transition-all duration-300 bg-yellow-500';
+                indicator.className = 'mb-4 p-3 rounded-lg bg-yellow-50 border border-yellow-200';
+            } else {
+                bar.className = 'h-2 rounded-full transition-all duration-300 bg-red-500';
+                indicator.className = 'mb-4 p-3 rounded-lg bg-red-50 border border-red-200';
             }
         }
         
@@ -716,6 +1093,16 @@ Using fitted values:
                 y: [plotData.data[1].y, plotData.data[3].y]
             }, [1, 3]);
             reportOutput.textContent = currentData.report;
+            
+            // Update fit quality for reset parameters
+            const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
+            const params = currentData.fitted_params;
+            const evaluationJson = evaluateFunc(params.eps_inf, params.delta_eps, params.omega1, params.omega2);
+            const evaluationData = JSON.parse(evaluationJson);
+            
+            if (evaluationData.evaluation) {
+                updateFitQualityIndicator(evaluationData.evaluation);
+            }
         }
 
         async function downloadResults() {
@@ -761,6 +1148,11 @@ Using fitted values:
                 const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
                 const reportData = JSON.parse(reportJson);
                 
+                // Get evaluation for current parameters
+                const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
+                const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
+                const evaluationData = JSON.parse(evaluationJson);
+                
                 // Get measured data from currentData
                 let measuredDk = currentData.measured_dk || [];
                 let measuredDf = currentData.measured_df || [];
@@ -781,10 +1173,16 @@ Using fitted values:
                                 return dk === 0 ? 0 : -modelResults.eps_double_prime[i] / dk;
                             })
                         }
-                    }
+                    },
+                    evaluation: evaluationData.evaluation
                 };
                 
                 zip.file(`${baseFilename}_report.json`, JSON.stringify(fullJsonReport, null, 2));
+                
+                // 5. Add evaluation report as separate markdown file
+                if (evaluationData.evaluation && evaluationData.evaluation.markdown_table) {
+                    zip.file(`${baseFilename}_evaluation.md`, evaluationData.evaluation.markdown_table);
+                }
 
                 // 5. Generate and Download Zip
                 const content = await zip.generateAsync({ type: "blob" });
@@ -860,6 +1258,20 @@ Using fitted values:
 
                 reportOutput.textContent = result.report;
                 setupParameterControls(result.fitted_params);
+                
+                // Show initial fit quality
+                const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
+                const eps_inf = result.fitted_params.eps_inf;
+                const delta_eps = result.fitted_params.delta_eps;
+                const omega1 = result.fitted_params.omega1;
+                const omega2 = result.fitted_params.omega2;
+                
+                const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
+                const evaluationData = JSON.parse(evaluationJson);
+                
+                if (evaluationData.evaluation) {
+                    updateFitQualityIndicator(evaluationData.evaluation);
+                }
                 
                 outputDiv.classList.remove('hidden');
 
