@@ -236,7 +236,7 @@ from dataclasses import dataclass, field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Fit Evaluator Classes (same as in Sarkar model)
+# Fit Evaluator Classes for Hybrid Model
 @dataclass
 class MetricResult:
     """Stores the evaluation result for a single metric."""
@@ -292,41 +292,48 @@ class ReportEvaluation:
             'markdown_table': self.to_markdown()
         }
 
-class FitEvaluator:
-    """Evaluates the quality of a fit report based on configurable metrics."""
-    DEFAULT_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
-        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Consider adding more terms or checking data quality."),
-        "rms_real":           (0.005, 0.010, 0.020, "Try increasing number of terms or check initial parameters."),
-        "rms_imag":           (0.001, 0.002, 0.005, "Add more Lorentz terms for better loss fitting."),
-        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias in the data."),
+class HybridModelEvaluator:
+    """
+    Evaluates the quality of a Hybrid Debye-Lorentz fit report.
+    """
+    HYBRID_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
+        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Consider reducing number of terms if overfitting."),
+        "rms_real":           (0.005, 0.010, 0.020, "Check term overlap or add more terms."),
+        "rms_imag":           (0.001, 0.002, 0.005, "Adjust gamma values for better loss fitting."),
+        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias."),
     }
 
-    DEFAULT_WEIGHTS: Dict[str, int] = {
-        'dpv': 1,
-        'reduced_chi_square': 3,
-        'rms_real': 2,
-        'rms_imag': 2,
-        'mean_residual': 1,
-        'correlation': 2
+    HYBRID_WEIGHTS: Dict[str, float] = {
+        'dpv': 1.0,
+        'reduced_chi_square': 3.0,
+        'rms_real': 2.0,
+        'rms_imag': 2.0,
+        'mean_residual': 1.0,
+        'tau_separation': 2.0,
+        'min_contribution': 1.5,
+        'max_contribution': 1.0,
+        'correlation': 2.0,
+        'like_param_correlation': 2.0,
+        'complexity_penalty': 1.5
     }
 
     def __init__(self, thresholds=None, weights=None):
-        self.thresholds = thresholds or FitEvaluator.DEFAULT_THRESHOLDS
-        self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
+        self.thresholds = thresholds or self.HYBRID_THRESHOLDS
+        self.weights = weights or self.HYBRID_WEIGHTS
 
     @classmethod
     def from_json_report(cls, json_data: Dict[str, Any]) -> Dict[str, Any]:
         """Convert JSON report format to evaluator format."""
         fit_stats = json_data.get('fit_statistics', {})
         residuals = json_data.get('residual_analysis', {})
+        params = json_data.get('parameters', {})
+        n_terms = json_data.get('n_terms', 1)
+
+        # Extract correlation matrix
         corr_matrix = json_data.get('correlation_matrix', [])
         correlations = {}
         if corr_matrix and isinstance(corr_matrix, list):
-            # For hybrid model, we have more parameters
-            n_params = len(corr_matrix)
-            param_names = []
-            n_terms = json_data.get('n_terms', 2)
-            param_names.append('eps_inf')
+            param_names = ['eps_inf']
             for i in range(n_terms):
                 param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}'])
 
@@ -347,7 +354,9 @@ class FitEvaluator:
             'rms_imag': residuals.get('imaginary_part', {}).get('rms', 0),
             'mean_real': residuals.get('real_part', {}).get('mean', 0),
             'mean_imag': residuals.get('imaginary_part', {}).get('mean', 0),
-            'correlations': correlations
+            'correlations': correlations,
+            'params': params,
+            'n_terms': n_terms
         }
 
     def _validate_report(self, report: Dict[str, Any]) -> None:
@@ -355,32 +364,79 @@ class FitEvaluator:
         try:
             n_data = int(report['n_data_points'])
             n_vars = int(report['n_variables'])
+            n_terms = int(report['n_terms'])
+
             if n_vars <= 0:
                 raise ValueError("n_variables must be positive")
             if n_data <= n_vars:
                 raise ValueError("n_data_points must exceed n_variables")
-            numeric_fields = ['reduced_chi_square', 'rms_real', 'rms_imag', 'mean_real', 'mean_imag']
-            for field in numeric_fields:
-                val = report.get(field, 0)
-                if not isinstance(val, (int, float)) or math.isnan(val):
-                    raise ValueError(f"{field} must be a valid number")
+            if n_terms < 1 or n_terms > 5:
+                raise ValueError("n_terms must be between 1 and 5")
+
+            # Check parameter bounds
+            params = report['params']
+            if params['eps_inf'] <= 0:
+                raise ValueError("eps_inf must be positive")
+
+            for i in range(n_terms):
+                if params[f'A{i+1}'] < 0:
+                    raise ValueError(f"A{i+1} must be non-negative")
+                if params[f'tau{i+1}'] <= 0:
+                    raise ValueError(f"tau{i+1} must be positive")
+                if params[f'alpha{i+1}'] <= 0 or params[f'alpha{i+1}'] > 1:
+                    raise ValueError(f"alpha{i+1} must be in (0,1]")
+                if params[f'gamma{i+1}'] < 0:
+                    raise ValueError(f"gamma{i+1} must be non-negative")
+
         except (TypeError, ValueError, KeyError) as e:
             raise ValueError(f"Invalid report data: {e}")
 
-    def _validate_physical_bounds(self, report: Dict[str, Any]) -> List[str]:
-        """Check if values are physically reasonable."""
+    def _validate_hybrid_model(self, params: Dict[str, float], n_terms: int) -> List[str]:
+        """Model-specific warnings for Hybrid Debye-Lorentz."""
         warnings = []
-        if report.get('rms_real', 0) > 1.0:
-            warnings.append("RMS real part unusually high - check data quality")
-        if report.get('rms_imag', 0) > 0.1:
-            warnings.append("RMS imaginary part very high - check loss data quality")
-        rcs = report.get('reduced_chi_square', 0)
-        if rcs < 1e-6 and rcs > 0:
-            warnings.append("Reduced chi-square suspiciously low - possible overfitting")
-        elif rcs > 1.0:
-            warnings.append("Reduced chi-square > 1 - model may be inadequate")
-        if report.get('rms_real', 0) < 0 or report.get('rms_imag', 0) < 0:
-            warnings.append("Negative RMS values detected - calculation error")
+
+        # Check if n_terms is high
+        if n_terms > 3:
+            warnings.append(f"Using {n_terms} terms - consider if model complexity is justified")
+
+        # Check tau ordering
+        taus = [params[f'tau{i+1}'] for i in range(n_terms)]
+        sorted_taus = sorted(taus)
+        if taus != sorted_taus:
+            warnings.append("Tau values not in monotonic order - consider reordering terms")
+
+        # Check tau separation
+        for i in range(len(sorted_taus)-1):
+            ratio = sorted_taus[i+1] / sorted_taus[i]
+            if ratio < 2:
+                warnings.append(f"Terms with tau ~{sorted_taus[i]:.2e} and ~{sorted_taus[i+1]:.2e} overlap significantly")
+
+        # Check contributions
+        A_vals = [params[f'A{i+1}'] for i in range(n_terms)]
+        total_A = sum(A_vals)
+        if total_A > 0:
+            contributions = [A/total_A for A in A_vals]
+            for i, contrib in enumerate(contributions):
+                if contrib < 0.01:
+                    warnings.append(f"Term {i+1} contributes <1% - consider removing")
+                elif contrib > 0.95:
+                    warnings.append(f"Term {i+1} dominates (>95%) - other terms may be superfluous")
+
+        # Check alpha/gamma values
+        for i in range(n_terms):
+            alpha = params[f'alpha{i+1}']
+            gamma = params[f'gamma{i+1}']
+
+            if alpha < 0.3:
+                warnings.append(f"Term {i+1}: alpha={alpha:.2f} very low (pure Debye-like)")
+            elif alpha > 0.95:
+                warnings.append(f"Term {i+1}: alpha={alpha:.2f} very high (check causality)")
+
+            if gamma > 2.0:
+                warnings.append(f"Term {i+1}: gamma={gamma:.2f} very high (overdamped)")
+            elif gamma < 0.1:
+                warnings.append(f"Term {i+1}: gamma={gamma:.2f} very low (underdamped)")
+
         return warnings
 
     def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
@@ -407,46 +463,97 @@ class FitEvaluator:
 
     def _evaluate_correlation(self, corr_value: float) -> Tuple[int, str, str | None]:
         """Evaluates correlation, returning score, category, and suggestion."""
-        if not isinstance(corr_value, (int, float)) or math.isnan(corr_value):
-            return 30, "Invalid", "Check correlation calculation"
         abs_corr = abs(corr_value)
         if abs_corr < 0.50:
             return 100, "Low", None
         elif abs_corr < 0.80:
             return 80, "Moderate", None
         elif abs_corr < 0.95:
-            return 60, "High", "Inspect uncertainties; consider fixing one parameter."
-        return 30, "Very High", "Fix or remove one highly correlated parameter."
+            return 60, "High", "Consider fixing one parameter"
+        return 30, "Very High", "Parameters are redundant"
+
+    def _evaluate_like_parameter_correlations(self, correlations: Dict, n_terms: int) -> Tuple[float, List[str]]:
+        """Evaluate correlations between like parameters (tau1 vs tau2, etc)."""
+        like_param_corrs = []
+        warnings = []
+
+        # Check correlations between same parameter types
+        param_types = ['A', 'tau', 'alpha', 'gamma']
+        for ptype in param_types:
+            for i in range(n_terms):
+                for j in range(i+1, n_terms):
+                    key1 = f'{ptype}{i+1}'
+                    key2 = f'{ptype}{j+1}'
+                    # Check both orderings
+                    if (key1, key2) in correlations:
+                        corr = correlations[(key1, key2)]
+                    elif (key2, key1) in correlations:
+                        corr = correlations[(key2, key1)]
+                    else:
+                        continue
+
+                    like_param_corrs.append(abs(corr))
+                    if abs(corr) > 0.9:
+                        warnings.append(f"{key1} and {key2} highly correlated ({corr:.2f})")
+
+        # Calculate score based on worst correlation
+        if like_param_corrs:
+            worst_corr = max(like_param_corrs)
+            score, _, _ = self._evaluate_correlation(worst_corr)
+        else:
+            score = 100
+
+        return score, warnings
+
+    def _calculate_complexity_penalty(self, n_terms: int, n_warnings: int) -> float:
+        """Calculate a penalty score based on model complexity."""
+        # Base penalty for number of terms
+        term_penalty = 0
+        if n_terms > 3:
+            term_penalty = (n_terms - 3) * 10  # -10 points per extra term above 3
+
+        # Warning penalty
+        warning_penalty = min(n_warnings * 5, 30)  # -5 points per warning, max -30
+
+        # Total penalty score (100 = no penalty, lower = more penalty)
+        penalty_score = max(100 - term_penalty - warning_penalty, 30)
+
+        return penalty_score
 
     def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
-        """Validates and evaluates a fit report dictionary."""
+        """Validates and evaluates a hybrid model fit report."""
         required = {
             'n_data_points', 'n_variables', 'reduced_chi_square',
-            'rms_real', 'rms_imag', 'mean_real', 'mean_imag', 'correlations'
+            'rms_real', 'rms_imag', 'mean_real', 'mean_imag',
+            'correlations', 'params', 'n_terms'
         }
         missing = required - report.keys()
         if missing:
             raise KeyError(f"Missing required report fields: {missing}")
 
         self._validate_report(report)
-        warnings = self._validate_physical_bounds(report)
 
         metrics: Dict[str, MetricResult] = {}
         suggestions: List[str] = []
+        params = report['params']
+        n_terms = report['n_terms']
 
-        mean_res = max(abs(report['mean_real']), abs(report['mean_imag']))
-        report_vals = dict(report)
-        report_vals['mean_residual'] = mean_res
+        # Get model-specific warnings
+        warnings = self._validate_hybrid_model(params, n_terms)
 
         # Data-points-per-variable
         dpv = report['n_data_points'] / report['n_variables']
         dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
-        dpv_sug = "Collect more data or reduce number of terms." if dpv_cat == "Poor" else None
+        dpv_sug = "Collect more data or reduce number of terms" if dpv_cat == "Poor" else None
         metrics['dpv'] = MetricResult('dpv', dpv_score, dpv_cat, dpv, dpv_sug)
         if dpv_sug:
             suggestions.append(dpv_sug)
 
-        # Scalar metrics
+        # Standard scalar metrics
+        mean_res = max(abs(report['mean_real']), abs(report['mean_imag']))
+        report_vals = dict(report)
+        report_vals['mean_residual'] = mean_res
+
         for name, (g, e, gd, sug) in self.thresholds.items():
             val = report_vals.get(name, 0)
             sc, cat = self._evaluate_scalar(val, (g, e, gd))
@@ -455,24 +562,80 @@ class FitEvaluator:
             if sugg:
                 suggestions.append(sugg)
 
-        # Correlation
-        corrs = report['correlations']
-        if not corrs:
-            corr_score, corr_cat, corr_sug = 100, "Low", None
-            worst_pair, worst_val = None, 0.0
+        # Tau separation metric
+        taus = sorted([params[f'tau{i+1}'] for i in range(n_terms)])
+        if len(taus) > 1:
+            tau_ratios = [taus[i+1]/taus[i] for i in range(len(taus)-1)]
+            min_tau_sep = min(tau_ratios)
         else:
+            min_tau_sep = float('inf')
+
+        tau_score, tau_cat = self._evaluate_inverse_scalar(min_tau_sep, (2, 5, 10))
+        tau_sug = "Terms too close in frequency - consider reducing N" if tau_cat == "Poor" else None
+        metrics['tau_separation'] = MetricResult('tau_separation', tau_score, tau_cat, min_tau_sep, tau_sug)
+        if tau_sug:
+            suggestions.append(tau_sug)
+
+        # Contribution metrics
+        A_vals = [params[f'A{i+1}'] for i in range(n_terms)]
+        total_A = sum(A_vals)
+        if total_A > 0:
+            contributions = [A/total_A for A in A_vals]
+            min_contrib = min(contributions)
+            max_contrib = max(contributions)
+        else:
+            min_contrib = 0
+            max_contrib = 0
+
+        # Min contribution
+        min_score, min_cat = self._evaluate_inverse_scalar(min_contrib, (0.001, 0.01, 0.05))
+        min_sug = "Some terms contribute very little - consider removing" if min_cat == "Poor" else None
+        metrics['min_contribution'] = MetricResult('min_contribution', min_score, min_cat, min_contrib, min_sug)
+        if min_sug:
+            suggestions.append(min_sug)
+
+        # Max contribution (penalize if >0.95)
+        max_score = 100 if max_contrib < 0.95 else 60
+        max_cat = "Good" if max_contrib < 0.95 else "High"
+        max_sug = "One term dominates - other terms may be unnecessary" if max_contrib > 0.95 else None
+        metrics['max_contribution'] = MetricResult('max_contribution', max_score, max_cat, max_contrib, max_sug)
+        if max_sug:
+            suggestions.append(max_sug)
+
+        # General correlations
+        corrs = report['correlations']
+        if corrs:
             worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
             corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
+        else:
+            corr_score, corr_cat, corr_sug = 100, "Low", None
+            worst_pair, worst_val = None, 0.0
 
-        corr_result = MetricResult(
+        metrics['correlation'] = MetricResult(
             'correlation', corr_score, corr_cat,
             worst_val, corr_sug, details={'pair': worst_pair}
         )
-        metrics['correlation'] = corr_result
         if corr_sug:
             suggestions.append(corr_sug)
 
-        # Overall score
+        # Like-parameter correlations
+        like_score, like_warnings = self._evaluate_like_parameter_correlations(corrs, n_terms)
+        metrics['like_param_correlation'] = MetricResult(
+            'like_param_correlation', like_score,
+            "Low" if like_score >= 80 else "High",
+            100 - like_score, None
+        )
+        warnings.extend(like_warnings)
+
+        # Complexity penalty
+        complexity_score = self._calculate_complexity_penalty(n_terms, len(warnings))
+        metrics['complexity_penalty'] = MetricResult(
+            'complexity_penalty', complexity_score,
+            "Low" if complexity_score >= 80 else "High",
+            100 - complexity_score, None
+        )
+
+        # Calculate overall score
         total_weight = sum(self.weights.values())
         overall_score = sum(
             metrics[k].score * self.weights.get(k, 1)
@@ -490,7 +653,13 @@ class FitEvaluator:
             overall_cat = "Poor"
 
         overall = MetricResult("overall", round(overall_score, 1), overall_cat, round(overall_score, 1))
-        return ReportEvaluation(metrics=metrics, overall=overall, suggestions=suggestions, warnings=warnings)
+
+        return ReportEvaluation(
+            metrics=metrics,
+            overall=overall,
+            suggestions=list(set(suggestions)),  # Remove duplicates
+            warnings=warnings
+        )
 
 # Global variables to store data
 global_f_ghz = None
@@ -691,6 +860,10 @@ def create_downloadable_plot(fitted_params, n_terms):
     if global_f_ghz is None:
         return None
 
+    # Ensure params is a proper Python dict
+    if hasattr(fitted_params, 'to_py'):
+        fitted_params = fitted_params.to_py()
+
     fitted_epsilon = calculate_hybrid_model(fitted_params, global_f_ghz, n_terms)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
@@ -808,6 +981,31 @@ Residual Analysis
         Std Dev: {np.std(imag_residuals):.4f}
         RMS: {np.sqrt(np.mean(imag_residuals**2)):.4f}
 
+Term Analysis
+--------------------------------------------------"""
+
+    # Add term analysis
+    A_values = [fit_params[f'A{i+1}'] for i in range(n_terms)]
+    total_A = sum(A_values)
+
+    for i in range(n_terms):
+        f0 = 1/(2*np.pi*fit_params[f'tau{i+1}'])/1e9
+        contribution = fit_params[f'A{i+1}']/total_A*100 if total_A > 0 else 0
+        alpha = fit_params[f'alpha{i+1}']
+        gamma = fit_params[f'gamma{i+1}']
+
+        character = 'Debye-like' if alpha < 0.5 else 'Hybrid' if alpha < 0.8 else 'Lorentz-like'
+        damping = 'Low' if gamma < 0.5 else 'High' if gamma > 1.5 else 'Moderate'
+
+        full_report += f"""
+    Term {i+1}:
+        Resonance frequency: {f0:.3f} GHz
+        Relative contribution: {contribution:.1f}%
+        Character: {character} (α={alpha:.2f})
+        Damping: {damping} (γ={gamma:.2f})"""
+
+    full_report += f"""
+
 {corr_text}
 
 Optimization Details
@@ -846,8 +1044,8 @@ Message: {result.message}
 
     # Evaluate the fit
     try:
-        evaluator = FitEvaluator()
-        report_data = FitEvaluator.from_json_report(json_data)
+        evaluator = HybridModelEvaluator()
+        report_data = HybridModelEvaluator.from_json_report(json_data)
         evaluation = evaluator.evaluate(report_data)
         json_data['evaluation'] = evaluation.to_dict()
     except Exception as e:
