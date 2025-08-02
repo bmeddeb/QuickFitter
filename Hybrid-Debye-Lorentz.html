@@ -305,16 +305,17 @@ class HybridModelEvaluator:
 
     HYBRID_WEIGHTS: Dict[str, float] = {
         'dpv': 1.0,
-        'reduced_chi_square': 3.0,
-        'rms_real': 2.0,
-        'rms_imag': 2.0,
-        'mean_residual': 1.0,
+        'reduced_chi_square': 2.0,
+        'rms_real': 3.0,
+        'rms_imag': 3.0,
+        'mean_residual': 2.0,
+        'regional_fit': 4.0,
         'tau_separation': 2.0,
-        'min_contribution': 1.5,
-        'max_contribution': 1.0,
-        'correlation': 2.0,
+        'min_contribution': 3.0,
+        'max_contribution': 2.0,
+        'correlation': 4.0,
         'like_param_correlation': 2.0,
-        'complexity_penalty': 1.5
+        'complexity_penalty': 2.0
     }
 
     def __init__(self, thresholds=None, weights=None):
@@ -349,6 +350,7 @@ class HybridModelEvaluator:
         return {
             'n_data_points': fit_stats.get('n_data_points', 0),
             'n_variables': fit_stats.get('n_variables', 4),
+            'chi_square': fit_stats.get('chi_square', 0),
             'reduced_chi_square': fit_stats.get('reduced_chi_square', 0),
             'rms_real': residuals.get('real_part', {}).get('rms', 0),
             'rms_imag': residuals.get('imaginary_part', {}).get('rms', 0),
@@ -520,6 +522,71 @@ class HybridModelEvaluator:
 
         return penalty_score
 
+    def _validate_frequency_range(self, params: Dict[str, float], n_terms: int, f_ghz_range: Tuple[float, float]) -> List[str]:
+        """Check if resonance frequencies are within or near the measurement range."""
+        warnings = []
+        f_min, f_max = f_ghz_range
+
+        for i in range(n_terms):
+            tau = params[f'tau{i+1}']
+            f0 = 1 / (2 * np.pi * tau) / 1e9  # Resonance frequency in GHz
+
+            if f0 < f_min * 0.1:  # More than 10x below minimum frequency
+                warnings.append(f"Term {i+1} resonance ({f0:.3f} GHz) is far below measurement range ({f_min}-{f_max} GHz)")
+            elif f0 > f_max * 10:  # More than 10x above maximum frequency
+                warnings.append(f"Term {i+1} resonance ({f0:.3f} GHz) is far above measurement range ({f_min}-{f_max} GHz)")
+
+        return warnings
+
+    def _evaluate_systematic_residuals(self, residuals_real: List[float], residuals_imag: List[float],
+                                     f_ghz: List[float]) -> Tuple[float, List[str]]:
+        """Check for systematic errors in different frequency regions."""
+        warnings = []
+
+        # Divide frequency range into thirds
+        n_points = len(f_ghz)
+        third = n_points // 3
+
+        regions = {
+            'low': (0, third),
+            'mid': (third, 2*third),
+            'high': (2*third, n_points)
+        }
+
+        max_regional_error = 0
+
+        for region_name, (start, end) in regions.items():
+            region_real = residuals_real[start:end]
+            region_imag = residuals_imag[start:end]
+
+            # Check for systematic bias in each region
+            mean_real = np.mean(region_real)
+            mean_imag = np.mean(region_imag)
+            rms_real = np.sqrt(np.mean(np.array(region_real)**2))
+            rms_imag = np.sqrt(np.mean(np.array(region_imag)**2))
+
+            # Score based on worst regional RMS
+            regional_error = max(rms_real, rms_imag * 10)  # Weight imaginary part more
+            max_regional_error = max(max_regional_error, regional_error)
+
+            # Warn if systematic bias in a region
+            if abs(mean_real) > 0.01:
+                warnings.append(f"Systematic bias in {region_name} frequency Dk: mean error = {mean_real:.3f}")
+            if abs(mean_imag) > 0.001:
+                warnings.append(f"Systematic bias in {region_name} frequency Df: mean error = {mean_imag:.3f}")
+
+        # Score: penalize heavily for regional errors
+        if max_regional_error < 0.01:
+            score = 100
+        elif max_regional_error < 0.02:
+            score = 80
+        elif max_regional_error < 0.05:
+            score = 60
+        else:
+            score = 30
+
+        return score, warnings
+
     def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
         """Validates and evaluates a hybrid model fit report."""
         required = {
@@ -531,6 +598,12 @@ class HybridModelEvaluator:
         if missing:
             raise KeyError(f"Missing required report fields: {missing}")
 
+        # Add optional fields with defaults
+        f_ghz_range = report.get('f_ghz_range', (0.5, 110))  # Default range
+        residuals_real = report.get('residuals_real', [])
+        residuals_imag = report.get('residuals_imag', [])
+        f_ghz = report.get('f_ghz', [])
+
         self._validate_report(report)
 
         metrics: Dict[str, MetricResult] = {}
@@ -541,6 +614,10 @@ class HybridModelEvaluator:
         # Get model-specific warnings
         warnings = self._validate_hybrid_model(params, n_terms)
 
+        # Check frequency range validity
+        freq_warnings = self._validate_frequency_range(params, n_terms, f_ghz_range)
+        warnings.extend(freq_warnings)
+
         # Data-points-per-variable
         dpv = report['n_data_points'] / report['n_variables']
         dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
@@ -549,18 +626,40 @@ class HybridModelEvaluator:
         if dpv_sug:
             suggestions.append(dpv_sug)
 
-        # Standard scalar metrics
+        # Standard scalar metrics with adjusted thresholds for hybrid model
         mean_res = max(abs(report['mean_real']), abs(report['mean_imag']))
+
+        # Tighten thresholds for better discrimination
+        adjusted_thresholds = {
+            "reduced_chi_square": (1e-5, 1e-4, 1e-3, "Model may be overfitting or missing physics."),
+            "rms_real":           (0.002, 0.005, 0.010, "Large RMS in Dk - check model adequacy."),
+            "rms_imag":           (0.0002, 0.0005, 0.001, "Large RMS in Df - adjust parameters."),
+            "mean_residual":      (1e-5, 1e-4, 5e-4, "Systematic bias detected."),
+        }
+
         report_vals = dict(report)
         report_vals['mean_residual'] = mean_res
 
-        for name, (g, e, gd, sug) in self.thresholds.items():
+        for name, (g, e, gd, sug) in adjusted_thresholds.items():
             val = report_vals.get(name, 0)
             sc, cat = self._evaluate_scalar(val, (g, e, gd))
             sugg = sug if cat == "Poor" else None
             metrics[name] = MetricResult(name, sc, cat, val, sugg)
             if sugg:
                 suggestions.append(sugg)
+
+        # Check for systematic errors in frequency regions
+        if residuals_real and residuals_imag and f_ghz:
+            regional_score, regional_warnings = self._evaluate_systematic_residuals(
+                residuals_real, residuals_imag, f_ghz
+            )
+            metrics['regional_fit'] = MetricResult(
+                'regional_fit', regional_score,
+                "Good" if regional_score >= 60 else "Poor",
+                100 - regional_score,
+                "Fit quality varies across frequency range" if regional_score < 60 else None
+            )
+            warnings.extend(regional_warnings)
 
         # Tau separation metric
         taus = sorted([params[f'tau{i+1}'] for i in range(n_terms)])
@@ -587,29 +686,51 @@ class HybridModelEvaluator:
             min_contrib = 0
             max_contrib = 0
 
-        # Min contribution
-        min_score, min_cat = self._evaluate_inverse_scalar(min_contrib, (0.001, 0.01, 0.05))
-        min_sug = "Some terms contribute very little - consider removing" if min_cat == "Poor" else None
+        # Min contribution - penalize heavily for very small contributions
+        if min_contrib < 0.01:
+            min_score = 30  # Poor
+        elif min_contrib < 0.05:
+            min_score = 60  # Acceptable
+        else:
+            min_score = 100  # Good
+
+        min_cat = "Poor" if min_score == 30 else "Acceptable" if min_score == 60 else "Good"
+        min_sug = "Remove terms with <1% contribution" if min_contrib < 0.01 else None
         metrics['min_contribution'] = MetricResult('min_contribution', min_score, min_cat, min_contrib, min_sug)
         if min_sug:
             suggestions.append(min_sug)
 
-        # Max contribution (penalize if >0.95)
-        max_score = 100 if max_contrib < 0.95 else 60
-        max_cat = "Good" if max_contrib < 0.95 else "High"
-        max_sug = "One term dominates - other terms may be unnecessary" if max_contrib > 0.95 else None
+        # Max contribution
+        max_score = 100 if max_contrib < 0.95 else 30  # Heavily penalize dominance
+        max_cat = "Good" if max_contrib < 0.95 else "Poor"
+        max_sug = "Term dominates - reduce to single term model" if max_contrib > 0.95 else None
         metrics['max_contribution'] = MetricResult('max_contribution', max_score, max_cat, max_contrib, max_sug)
         if max_sug:
             suggestions.append(max_sug)
 
-        # General correlations
+        # General correlations - stricter evaluation
         corrs = report['correlations']
         if corrs:
+            # Count high correlations
+            high_corr_count = sum(1 for _, v in corrs.items() if abs(v) > 0.9)
+            very_high_corr_count = sum(1 for _, v in corrs.items() if abs(v) > 0.95)
+
             worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
-            corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
+
+            # Penalize based on number of high correlations
+            if very_high_corr_count > 0:
+                corr_score = 30  # Poor
+                corr_sug = f"{very_high_corr_count} parameter pairs nearly identical"
+            elif high_corr_count > 2:
+                corr_score = 50  # Bad
+                corr_sug = f"{high_corr_count} parameter pairs highly correlated"
+            else:
+                corr_score, _, corr_sug = self._evaluate_correlation(worst_val)
         else:
-            corr_score, corr_cat, corr_sug = 100, "Low", None
+            corr_score, corr_sug = 100, None
             worst_pair, worst_val = None, 0.0
+
+        corr_cat = "Poor" if corr_score <= 30 else "Bad" if corr_score <= 50 else "Moderate" if corr_score <= 80 else "Good"
 
         metrics['correlation'] = MetricResult(
             'correlation', corr_score, corr_cat,
@@ -635,20 +756,36 @@ class HybridModelEvaluator:
             100 - complexity_score, None
         )
 
-        # Calculate overall score
-        total_weight = sum(self.weights.values())
+        # Calculate overall score with adjusted weights
+        weights = {
+            'dpv': 1.0,
+            'reduced_chi_square': 2.0,
+            'rms_real': 3.0,
+            'rms_imag': 3.0,
+            'mean_residual': 2.0,
+            'regional_fit': 4.0,  # High weight for regional fit quality
+            'tau_separation': 2.0,
+            'min_contribution': 3.0,  # High weight for contribution issues
+            'max_contribution': 2.0,
+            'correlation': 4.0,  # High weight for correlation issues
+            'like_param_correlation': 2.0,
+            'complexity_penalty': 2.0
+        }
+
+        total_weight = sum(weights.get(k, 0) for k in metrics.keys())
         overall_score = sum(
-            metrics[k].score * self.weights.get(k, 1)
+            metrics[k].score * weights.get(k, 1)
             for k in metrics.keys()
-            if k in self.weights
+            if k in weights
         ) / total_weight
 
-        if overall_score >= 90:
-            overall_cat = "Godly"
-        elif overall_score >= 75:
+        # More stringent overall categorization
+        if overall_score >= 85:
             overall_cat = "Excellent"
-        elif overall_score >= 60:
+        elif overall_score >= 70:
             overall_cat = "Good"
+        elif overall_score >= 50:
+            overall_cat = "Fair"
         else:
             overall_cat = "Poor"
 
@@ -657,7 +794,7 @@ class HybridModelEvaluator:
         return ReportEvaluation(
             metrics=metrics,
             overall=overall,
-            suggestions=list(set(suggestions)),  # Remove duplicates
+            suggestions=list(set(suggestions)),
             warnings=warnings
         )
 
@@ -819,6 +956,38 @@ def calculate_correlation_matrix(params_dict, f_ghz, n_terms):
     except:
         return None
 
+def get_user_friendly_message(technical_message):
+    """Convert technical optimization messages to user-friendly language"""
+    message_map = {
+        "xtol termination condition is satisfied.":
+            "Parameters converged to stable values (changes < 0.00000001)",
+        "ftol termination condition is satisfied.":
+            "Fit quality stabilized (improvement < 0.00000001)",
+        "gtol termination condition is satisfied.":
+            "Found optimal solution (gradient near zero)",
+        "Maximum number of iterations reached.":
+            "Stopped at iteration limit - consider increasing iterations or adjusting initial parameters",
+        "Both xtol and ftol termination conditions are satisfied.":
+            "Excellent convergence - both parameters and fit quality stabilized",
+        "Optimization terminated successfully.":
+            "Found optimal parameters successfully",
+        "The relative error between two consecutive iterates is at most xtol.":
+            "Parameters converged to stable values",
+        "Number of iterations exceeded max_nfev.":
+            "Reached maximum function evaluations - may need more iterations"
+    }
+
+    # Check if we have a user-friendly version
+    for tech_msg, friendly_msg in message_map.items():
+        if tech_msg in technical_message:
+            return friendly_msg
+
+    # If no match, return a generic friendly message with the technical one
+    if "satisfied" in technical_message.lower():
+        return "Optimization converged successfully ({})".format(technical_message)
+    else:
+        return "Optimization completed ({})".format(technical_message)
+
 def format_correlation_matrix(corr_matrix, n_terms):
     """Format correlation matrix for display"""
     if corr_matrix is None:
@@ -894,6 +1063,15 @@ def create_downloadable_plot(fitted_params, n_terms):
     buf.seek(0)
     return buf.getvalue()
 
+def get_user_friendly_method(method):
+    """Convert technical method names to user-friendly descriptions"""
+    method_map = {
+        "least_squares": "Levenberg-Marquardt (robust nonlinear least squares)",
+        "nelder": "Nelder-Mead Simplex (derivative-free optimization)",
+        "lbfgsb": "L-BFGS-B (memory-efficient quasi-Newton method)"
+    }
+    return method_map.get(method, method)
+
 def run_analysis(csv_content, n_terms, method):
     global global_f_ghz, global_complex_epsilon
     f_ghz, complex_epsilon_data = load_data(csv_content)
@@ -930,6 +1108,66 @@ def run_analysis(csv_content, n_terms, method):
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(result.params.valuesdict(), f_ghz, n_terms)
     corr_text = format_correlation_matrix(corr_matrix, n_terms)
+
+    # Create JSON data structure first (before using it)
+    json_data = {
+        "model": "Hybrid Debye-Lorentz",
+        "n_terms": n_terms,
+        "timestamp": datetime.now().isoformat(),
+        "parameters": fit_params,
+        "fit_statistics": {
+            "n_data_points": n_dat,
+            "n_variables": n_var,
+            "chi_square": chi_sqr,
+            "reduced_chi_square": red_chi_sqr
+        },
+        "residual_analysis": {
+            "real_part": {
+                "mean": float(np.mean(real_residuals)),
+                "std_dev": float(np.std(real_residuals)),
+                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+            },
+            "imaginary_part": {
+                "mean": float(np.mean(imag_residuals)),
+                "std_dev": float(np.std(imag_residuals)),
+                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            }
+        },
+        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+    }
+
+    # Calculate information criteria
+    # AIC = 2k - 2ln(L), where k is number of parameters
+    # For least squares: AIC = n*ln(RSS/n) + 2k
+    # BIC = ln(n)*k - 2ln(L) = n*ln(RSS/n) + k*ln(n)
+    # AIC_c = AIC + 2k(k+1)/(n-k-1) for small sample correction
+
+    rss = chi_sqr  # Residual sum of squares
+    n = n_dat  # Number of data points
+    k = n_var  # Number of parameters
+
+    # Calculate log-likelihood assuming normally distributed errors
+    # For least squares: -2*log(L) ≈ n*log(RSS/n) + n*log(2π) + n
+    # We'll use the simplified form for AIC/BIC
+
+    aic = n * np.log(rss/n) + 2 * k
+    bic = n * np.log(rss/n) + k * np.log(n)
+
+    # Corrected AIC for small samples
+    if n - k - 1 > 0:
+        AIC_c = aic + (2 * k * (k + 1)) / (n - k - 1)
+    else:
+        AIC_c = np.inf
+
+    # Add to JSON data
+    json_data['information_criteria'] = {
+        'AIC': float(aic),
+        'BIC': float(bic),
+        'AIC_c': float(AIC_c),
+        'n_data': n,
+        'n_params': k,
+        'RSS': float(rss)
+    }
 
     # Create model description
     model_desc = f"""Hybrid Debye-Lorentz Model with {n_terms} term(s)
@@ -1004,48 +1242,44 @@ Term Analysis
         Character: {character} (α={alpha:.2f})
         Damping: {damping} (γ={gamma:.2f})"""
 
+    # Add information criteria section
+    ic_section = ""
+    if json_data.get('information_criteria'):
+        ic = json_data['information_criteria']
+        ic_section = f"""
+Model Selection Criteria
+--------------------------------------------------
+    AIC  = {ic['AIC']:.2f} (Akaike Information Criterion)
+    BIC  = {ic['BIC']:.2f} (Bayesian Information Criterion)
+    AIC_c = {ic['AIC_c']:.2f} (Corrected AIC for small samples)
+
+    Note: Lower values indicate better model. BIC penalizes complexity
+    more strongly than AIC, especially for larger datasets.
+"""
+
     full_report += f"""
 
 {corr_text}
-
-Optimization Details
+{ic_section}
+Optimization Summary
 --------------------------------------------------
-Method: {method}
-Success: {result.success}
-Message: {result.message}
+Method Used: {method}
+Fitting Status: {"✓ Completed Successfully" if result.success else "✗ Failed"}
+Convergence Details: {get_user_friendly_message(result.message)}
 """
-
-    # Create JSON data structure
-    json_data = {
-        "model": "Hybrid Debye-Lorentz",
-        "n_terms": n_terms,
-        "timestamp": datetime.now().isoformat(),
-        "parameters": fit_params,
-        "fit_statistics": {
-            "n_data_points": n_dat,
-            "n_variables": n_var,
-            "chi_square": chi_sqr,
-            "reduced_chi_square": red_chi_sqr
-        },
-        "residual_analysis": {
-            "real_part": {
-                "mean": float(np.mean(real_residuals)),
-                "std_dev": float(np.std(real_residuals)),
-                "rms": float(np.sqrt(np.mean(real_residuals**2)))
-            },
-            "imaginary_part": {
-                "mean": float(np.mean(imag_residuals)),
-                "std_dev": float(np.std(imag_residuals)),
-                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
-            }
-        },
-        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
-    }
 
     # Evaluate the fit
     try:
         evaluator = HybridModelEvaluator()
         report_data = HybridModelEvaluator.from_json_report(json_data)
+        # Add additional data for better evaluation
+        report_data['f_ghz_range'] = (min(f_ghz), max(f_ghz))
+        report_data['residuals_real'] = real_residuals.tolist()
+        report_data['residuals_imag'] = imag_residuals.tolist()
+        report_data['f_ghz'] = f_ghz.tolist()
+        # Add measured data
+        report_data['measured_dk'] = np.real(complex_epsilon_data).tolist()
+        report_data['measured_df'] = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
         evaluation = evaluator.evaluate(report_data)
         json_data['evaluation'] = evaluation.to_dict()
     except Exception as e:
@@ -1438,14 +1672,14 @@ Message: {result.message}
 
                 const reportText = reportOutput.textContent;
                 const updatedReport = reportText.replace(
-                    /Using fitted values:[\s\S]*?Fit Statistics/,
-                    `Using current values (manual):\n    ${paramsText}\nFit Statistics`
+                    /Fitted Parameters:[\s\S]*?Fit Statistics/,
+                    `Fitted Parameters:\n    ${paramsText}\nFit Statistics`
                 );
 
                 // Update statistics in report
                 const statsUpdate = updatedReport.replace(
                     /chi-square\s*=\s*[\d.]+/,
-                    `chi-square    = ${chi_sqr.toFixed(4)}`
+                    `chi-square         = ${chi_sqr.toFixed(4)}`
                 ).replace(
                     /reduced chi-square\s*=\s*[\d.]+/,
                     `reduced chi-square = ${red_chi_sqr.toFixed(4)}`
@@ -1557,9 +1791,11 @@ Message: {result.message}
 
                 // 2. Add Matplotlib Plot Image
                 const createPlotFunc = pyodide.globals.get('create_downloadable_plot');
-                const imageProxy = createPlotFunc(params, n_terms);
+                const pyParamsForPlot = pyodide.toPy(params);
+                const imageProxy = createPlotFunc(pyParamsForPlot, n_terms);
                 const imageData = imageProxy.toJs();
                 imageProxy.destroy();
+                pyParamsForPlot.destroy();
                 zip.file(`${baseFilename}_plot_hybrid.png`, imageData);
 
                 // 3. Add Report (human-readable .txt)
