@@ -156,6 +156,67 @@
                             </div>
                         </div>
 
+                        <!-- Metric Breakdown Chart -->
+                        <div id="radar-chart-container" class="mb-4 p-4 border border-gray-200 rounded-lg bg-gray-50 hidden">
+                            <h4 class="text-sm font-semibold text-gray-700 mb-3">Metric Breakdown</h4>
+                            <div id="radar-chart" class="w-full overflow-hidden" style="height: 280px; max-width: 100%;"></div>
+                        </div>
+
+                        <!-- Scoring Preferences Panel -->
+                        <div id="scoring-prefs" class="mb-4 p-4 border border-gray-200 rounded-lg bg-gray-50 hidden">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="text-sm font-semibold text-gray-700">Scoring Priorities</h4>
+                                <button id="toggle-scoring-prefs" class="text-xs text-blue-600 hover:text-blue-800">
+                                    <span class="toggle-text">Show</span>
+                                </button>
+                            </div>
+                            <div id="scoring-sliders" class="space-y-3 hidden">
+                                <div class="slider-group">
+                                    <label class="flex items-center justify-between text-xs text-gray-600">
+                                        <span>Uniform Fit Across Bands</span>
+                                        <span id="weight-regional_fit-value" class="font-mono">4.0</span>
+                                    </label>
+                                    <input type="range" id="weight-regional_fit" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                                           min="0" max="5" step="0.5" value="4" />
+                                </div>
+                                <div class="slider-group">
+                                    <label class="flex items-center justify-between text-xs text-gray-600">
+                                        <span>Low RMS in Dk</span>
+                                        <span id="weight-rms_real-value" class="font-mono">3.0</span>
+                                    </label>
+                                    <input type="range" id="weight-rms_real" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                                           min="0" max="5" step="0.5" value="3" />
+                                </div>
+                                <div class="slider-group">
+                                    <label class="flex items-center justify-between text-xs text-gray-600">
+                                        <span>Low RMS in Df</span>
+                                        <span id="weight-rms_imag-value" class="font-mono">3.0</span>
+                                    </label>
+                                    <input type="range" id="weight-rms_imag" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                                           min="0" max="5" step="0.5" value="3" />
+                                </div>
+                                <div class="slider-group">
+                                    <label class="flex items-center justify-between text-xs text-gray-600">
+                                        <span>Chi-Square Fit</span>
+                                        <span id="weight-reduced_chi_square-value" class="font-mono">2.0</span>
+                                    </label>
+                                    <input type="range" id="weight-reduced_chi_square" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                                           min="0" max="5" step="0.5" value="2" />
+                                </div>
+                                <div class="slider-group">
+                                    <label class="flex items-center justify-between text-xs text-gray-600">
+                                        <span>Model Simplicity (BIC)</span>
+                                        <span id="weight-bic-value" class="font-mono">2.0</span>
+                                    </label>
+                                    <input type="range" id="weight-bic" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                                           min="0" max="5" step="0.5" value="2" />
+                                </div>
+                                <button id="apply-scoring-prefs" class="mt-3 w-full px-3 py-2 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors">
+                                    Apply Changes
+                                </button>
+                            </div>
+                        </div>
+
                         <div id="parameters-display" class="space-y-4 text-sm overflow-y-auto" style="max-height: 600px;">
                             <!-- Parameters will be dynamically inserted here -->
                         </div>
@@ -317,11 +378,59 @@ class HybridModelEvaluator:
         'max_contribution': 2.0,
         'correlation': 4.0,
         'like_param_correlation': 2.0,
-        'complexity_penalty': 2.0
+        'complexity_penalty': 2.0,
+        'bic': 2.0
     }
 
-    def __init__(self, weights=None):
-        self.weights = weights or self.HYBRID_WEIGHTS
+    def __init__(self, weights=None, data_props=None):
+        self.data_props = data_props or {}
+        self.base_weights = weights or self.HYBRID_WEIGHTS
+        self.weights = self._adapt_weights(self.base_weights, self.data_props)
+    
+    def _adapt_weights(self, base_weights: Dict[str, float], data_props: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Dynamically adjust metric weights based on data properties.
+        
+        Args:
+            base_weights: The base weights to start from
+            data_props: Dictionary containing:
+                - dpv: data points per variable
+                - freq_span: frequency span in decades (log10(f_max/f_min))
+                - sigma_real: noise level in real part
+                - sigma_imag: noise level in imaginary part
+        
+        Returns:
+            Adapted weights dictionary
+        """
+        weights = base_weights.copy()
+        
+        # If UI weights exist, use them as priority and only apply minimal data adaptations
+        if hasattr(self, 'ui_weights') and self.ui_weights:
+            # Start with UI weights
+            for weight_name, weight_value in self.ui_weights.items():
+                if weight_name in weights:
+                    weights[weight_name] = weight_value
+            
+            # Apply only critical data-driven adjustments (more conservative)
+            # Only apply dpv boost for very low data scenarios
+            if data_props.get('dpv', float('inf')) < 5:  # More restrictive threshold
+                weights['dpv'] = weights.get('dpv', 1.0) * 1.2  # Smaller multiplier
+                
+        else:
+            # Full data-driven adaptation when no UI weights are set
+            # Emphasize dpv metric for low data-point scenarios
+            if data_props.get('dpv', float('inf')) < 10:
+                weights['dpv'] = weights.get('dpv', 1.0) * 1.5
+                
+            # Emphasize regional fit for ultra-broadband data (>3 decades)
+            if data_props.get('freq_span', 0) > 3:
+                weights['regional_fit'] = weights.get('regional_fit', 4.0) * 1.2
+                
+            # Down-weight rms_imag if real part is much noisier
+            if data_props.get('sigma_real', 1) / data_props.get('sigma_imag', 1) > 2:
+                weights['rms_imag'] = weights.get('rms_imag', 3.0) * 0.8
+                
+        return weights
 
     @classmethod
     def from_json_report(cls, json_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -359,7 +468,8 @@ class HybridModelEvaluator:
             'mean_imag': residuals.get('loss_tangent', {}).get('mean', 0),  # Now using loss tangent
             'correlations': correlations,
             'params': params,
-            'n_terms': n_terms
+            'n_terms': n_terms,
+            'information_criteria': json_data.get('information_criteria', {})
         }
 
     def _validate_report(self, report: Dict[str, Any]) -> None:
@@ -647,8 +757,28 @@ class HybridModelEvaluator:
         freq_warnings = self._validate_frequency_range(params, n_terms, f_ghz_range)
         warnings.extend(freq_warnings)
 
-        # Data-points-per-variable
+        # Construct data properties for dynamic weight adaptation
         dpv = report['n_data_points'] / report['n_variables']
+        freq_span = np.log10(f_ghz_range[1] / f_ghz_range[0]) if f_ghz_range[0] > 0 else 3.0
+        sigma_real = noise_levels.get('rms_real', 1.0)
+        sigma_imag = noise_levels.get('rms_imag', 1.0)
+        
+        data_props = {
+            'dpv': dpv,
+            'freq_span': freq_span,
+            'sigma_real': sigma_real,
+            'sigma_imag': sigma_imag
+        }
+        
+        # Update weights based on current data properties (but preserve UI weights if set)
+        if not hasattr(self, 'ui_weights') or not self.ui_weights:
+            self.weights = self._adapt_weights(self.base_weights, data_props)
+        else:
+            # When UI weights are set, just update data_props for potential minimal adaptations
+            self.data_props = data_props
+            self.weights = self._adapt_weights(self.base_weights, data_props)
+        
+        # Data-points-per-variable
         dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
         dpv_sug = "Collect more data or reduce number of terms" if dpv_cat == "Poor" else None
         metrics['dpv'] = MetricResult('dpv', dpv_score, dpv_cat, dpv, dpv_sug)
@@ -779,6 +909,24 @@ class HybridModelEvaluator:
             100 - complexity_score, None
         )
 
+        # BIC metric for model selection
+        if 'information_criteria' in report and report['information_criteria']:
+            ic = report['information_criteria']
+            bic = ic.get('BIC', 0)
+            n_data = ic.get('n_data', report['n_data_points'])
+            
+            # Normalize BIC to 0-100 score (lower BIC is better)
+            # Scale factor may need tuning based on typical BIC ranges
+            bic_score = 100 - 10 * (bic / n_data) if n_data > 0 else 50
+            bic_score = max(min(bic_score, 100), 0)  # Clamp to [0, 100]
+            
+            bic_cat = "Good" if bic_score >= 70 else "Fair" if bic_score >= 50 else "Poor"
+            bic_sug = "Consider reducing model complexity" if bic_score < 50 else None
+            
+            metrics['bic'] = MetricResult('bic', bic_score, bic_cat, bic, bic_sug)
+            if bic_sug:
+                suggestions.append(bic_sug)
+
         # Calculate overall score using class weights
         weights = self.weights
         total_weight = sum(weights.get(k, 0) for k in metrics)
@@ -812,6 +960,199 @@ global_f_ghz = None
 global_complex_epsilon = None
 global_measured_dk = None
 global_measured_df = None
+global_evaluator = None
+current_json_data = None
+
+def set_ui_weights(ui_weights):
+    """Set user interface weights for the global evaluator."""
+    global global_evaluator
+    if global_evaluator is None:
+        global_evaluator = HybridModelEvaluator()
+    
+    # Convert PyProxy to Python dict if needed
+    if hasattr(ui_weights, 'to_py'):
+        ui_weights = ui_weights.to_py()
+    
+    print(f"Setting UI weights: {ui_weights}")
+    print(f"Original base weights: {global_evaluator.base_weights}")
+    
+    # Update the evaluator's base weights with UI preferences
+    for weight_name, weight_value in ui_weights.items():
+        if weight_name in global_evaluator.base_weights:
+            old_value = global_evaluator.base_weights[weight_name]
+            global_evaluator.base_weights[weight_name] = weight_value
+            print(f"  {weight_name}: {old_value} -> {weight_value}")
+    
+    # Safety check: ensure at least one weight is positive
+    if all(v == 0 for v in global_evaluator.base_weights.values()):
+        global_evaluator.base_weights['dpv'] = 1.0  # Use dpv as failsafe
+        print("All weights were zero, setting dpv failsafe to 1.0")
+    
+    # Store the UI weights to prevent them from being overridden
+    global_evaluator.ui_weights = ui_weights.copy()
+    
+    # Re-adapt weights with UI preferences taking priority
+    old_weights = global_evaluator.weights.copy()
+    global_evaluator.weights = global_evaluator._adapt_weights(
+        global_evaluator.base_weights, 
+        global_evaluator.data_props
+    )
+    print(f"Final weights: {global_evaluator.weights}")
+    
+    # Check if weights actually changed
+    weight_changes = {}
+    for key in global_evaluator.weights:
+        if key in old_weights:
+            if old_weights[key] != global_evaluator.weights[key]:
+                weight_changes[key] = f"{old_weights[key]} -> {global_evaluator.weights[key]}"
+    
+    if weight_changes:
+        print(f"Weight changes detected: {weight_changes}")
+    else:
+        print("No weight changes detected - this might be why score isn't changing")
+    
+    return True  # Sentinel value for await synchronization
+
+def reevaluate_with_current_weights():
+    """Re-run the evaluator on the last fit with the *current* weights."""
+    global global_evaluator, current_json_data
+    if global_evaluator is None or current_json_data is None:
+        return None  # let JS handle the null
+    
+    # Debug: Print current weights
+    print(f"Current evaluator weights: {global_evaluator.weights}")
+    
+    report_data = global_evaluator.from_json_report(current_json_data)
+    
+    # Re-inject the extra arrays – they are still in current_json_data
+    report_data.update({
+        'f_ghz_range': current_json_data.get('f_ghz_range', (0.5, 110)),
+        'residuals_real': current_json_data.get('residuals_real', []),
+        'residuals_imag': current_json_data.get('residuals_imag', []),
+        'f_ghz': current_json_data.get('f_ghz', [])
+    })
+    
+    # Noise estimates (fall back to None gracefully)
+    ic = current_json_data.get('information_criteria', {})
+    noise_levels = None
+    if ic:
+        noise_levels = {
+            'rms_real': ic.get('sigma_real', 1.0),
+            'rms_imag': ic.get('sigma_df', 1.0),
+            'reduced_chi_square': 1.0,
+            'mean_residual': min(ic.get('sigma_real', 1.0), ic.get('sigma_df', 1.0))
+        }
+    
+    evaluation = global_evaluator.evaluate(report_data, noise_levels)
+    print(f"New overall score: {evaluation.overall.score}")
+    
+    # Debug: Print individual metric scores
+    for metric_name, metric_result in evaluation.metrics.items():
+        print(f"  {metric_name}: {metric_result.score}")
+    
+    return evaluation.to_dict()
+
+def calibrate_weights_from_labeled_data(labeled_fits, max_iterations=100):
+    """
+    Weight calibration tool for learning optimal weights from labeled data.
+    
+    Args:
+        labeled_fits: List of tuples (json_data, true_label) where:
+            - json_data: Fit results in JSON format
+            - true_label: Expert rating (0-100 scale)
+        max_iterations: Maximum optimization iterations
+    
+    Returns:
+        Dictionary of learned weights
+    """
+    from scipy.optimize import minimize
+    import numpy as np
+    
+    if not labeled_fits:
+        return HybridModelEvaluator.HYBRID_WEIGHTS.copy()
+    
+    # Extract features and labels
+    evaluator = HybridModelEvaluator()
+    feature_vectors = []
+    labels = []
+    
+    for json_data, true_label in labeled_fits:
+        try:
+            report_data = evaluator.from_json_report(json_data)
+            evaluation = evaluator.evaluate(report_data)
+            
+            # Create feature vector from individual metric scores
+            metrics = evaluation.metrics
+            feature_vector = []
+            metric_names = []
+            
+            for metric_name in evaluator.base_weights.keys():
+                if metric_name in metrics:
+                    feature_vector.append(metrics[metric_name].score)
+                    metric_names.append(metric_name)
+                else:
+                    feature_vector.append(0.0)  # Default for missing metrics
+                    metric_names.append(metric_name)
+            
+            feature_vectors.append(feature_vector)
+            labels.append(true_label)
+            
+        except Exception as e:
+            print(f"Warning: Skipping invalid fit data: {e}")
+            continue
+    
+    if not feature_vectors:
+        print("No valid training data found")
+        return evaluator.base_weights.copy()
+    
+    feature_vectors = np.array(feature_vectors)
+    labels = np.array(labels)
+    
+    # Define objective function for weight optimization
+    def objective(weights):
+        predicted_scores = []
+        for features in feature_vectors:
+            # Calculate weighted score
+            total_weight = sum(weights)
+            if total_weight == 0:
+                predicted_score = 0
+            else:
+                predicted_score = sum(features[i] * weights[i] for i in range(len(weights))) / total_weight
+            predicted_scores.append(predicted_score)
+        
+        # Mean squared error
+        mse = np.mean((np.array(predicted_scores) - labels) ** 2)
+        return mse
+    
+    # Initial weights (normalized)
+    initial_weights = list(evaluator.base_weights.values())
+    initial_weights = np.array(initial_weights) / sum(initial_weights)
+    
+    # Constraints: weights must be non-negative and sum to something reasonable
+    bounds = [(0, 10) for _ in initial_weights]  # Allow weights up to 10
+    
+    # Optimize weights
+    try:
+        result = minimize(objective, initial_weights, bounds=bounds, 
+                         method='L-BFGS-B', options={'maxiter': max_iterations})
+        
+        if result.success:
+            learned_weights = result.x
+            # Convert back to dictionary format
+            weight_dict = {}
+            for i, metric_name in enumerate(evaluator.base_weights.keys()):
+                weight_dict[metric_name] = float(learned_weights[i])
+            
+            print(f"Weight calibration completed successfully")
+            print(f"Final MSE: {result.fun:.4f}")
+            return weight_dict
+        else:
+            print(f"Weight optimization failed: {result.message}")
+            return evaluator.base_weights.copy()
+            
+    except Exception as e:
+        print(f"Error during weight optimization: {e}")
+        return evaluator.base_weights.copy()
 
 def load_data(csv_content):
     global global_f_ghz, global_complex_epsilon, global_measured_dk, global_measured_df
@@ -1115,7 +1456,7 @@ def get_user_friendly_method(method):
     return method_map.get(method, method)
 
 def run_analysis(csv_content, n_terms, method):
-    global global_f_ghz, global_complex_epsilon
+    global global_f_ghz, global_complex_epsilon, current_json_data, global_evaluator
     f_ghz, complex_epsilon_data = load_data(csv_content)
 
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_terms)
@@ -1395,9 +1736,19 @@ Fitting Status: {"✓ Completed Successfully" if result.success else "✗ Failed
 Convergence Details: {get_user_friendly_message(result.message)}
 """
 
+    # Store global data BEFORE evaluation attempt
+    global_evaluator = HybridModelEvaluator()
+    
+    # Store JSON data with additional fields needed for re-evaluation
+    json_data['f_ghz_range'] = (min(f_ghz), max(f_ghz))
+    json_data['residuals_real'] = res_real.tolist()
+    json_data['residuals_imag'] = res_df.tolist()
+    json_data['f_ghz'] = f_ghz.tolist()
+    current_json_data = json_data
+
     # Evaluate the fit
     try:
-        evaluator = HybridModelEvaluator()
+        evaluator = global_evaluator  # reuse
         report_data = HybridModelEvaluator.from_json_report(json_data)
         # Add additional data for better evaluation
         report_data['f_ghz_range'] = (min(f_ghz), max(f_ghz))
@@ -1417,6 +1768,7 @@ Convergence Details: {get_user_friendly_message(result.message)}
         }
         evaluation = evaluator.evaluate(report_data, noise_levels)
         json_data['evaluation'] = evaluation.to_dict()
+        
     except Exception as e:
         logger.warning(f"Could not evaluate fit: {e}")
         json_data['evaluation'] = None
@@ -1872,9 +2224,11 @@ Convergence Details: {get_user_friendly_message(result.message)}
             const indicator = document.getElementById('fit-quality-indicator');
             const scoreSpan = document.getElementById('fit-quality-score');
             const bar = document.getElementById('fit-quality-bar');
+            const radarContainer = document.getElementById('radar-chart-container');
 
             if (!evaluation) {
                 indicator.classList.add('hidden');
+                radarContainer.classList.add('hidden');
                 return;
             }
 
@@ -1899,6 +2253,101 @@ Convergence Details: {get_user_friendly_message(result.message)}
             } else {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-red-500';
                 indicator.className = 'mb-4 p-3 rounded-lg bg-red-50 border border-red-200';
+            }
+
+            // Update radar chart
+            updateRadarChart(evaluation);
+        }
+
+        function updateRadarChart(evaluation) {
+            if (!evaluation || !evaluation.metrics) return;
+
+            const radarContainer = document.getElementById('radar-chart-container');
+            const radarDiv = document.getElementById('radar-chart');
+
+            // Extract metric names and scores, excluding 'overall'
+            const metrics = evaluation.metrics;
+            const metricNames = Object.keys(metrics).filter(name => name !== 'overall');
+            const metricScores = metricNames.map(name => metrics[name].score);
+            
+            // Create user-friendly labels
+            const labelMap = {
+                'dpv': 'Data/Param Ratio',
+                'reduced_chi_square': 'Chi-Square Fit',
+                'rms_real': 'RMS Real',
+                'rms_imag': 'RMS Imaginary',
+                'mean_residual': 'Systematic Bias',
+                'regional_fit': 'Regional Fit',
+                'tau_separation': 'Frequency Sep.',
+                'min_contribution': 'Min Contribution',
+                'max_contribution': 'Max Contribution',
+                'correlation': 'Correlations',
+                'like_param_correlation': 'Similar Params',
+                'complexity_penalty': 'Complexity',
+                'bic': 'Model Selection'
+            };
+            
+            const friendlyLabels = metricNames.map(name => labelMap[name] || name);
+
+            // Create radar chart
+            const trace = {
+                type: 'scatterpolar',
+                r: metricScores,
+                theta: friendlyLabels,
+                fill: 'toself',
+                name: 'Metric Scores',
+                line: { color: '#3B82F6' },
+                fillcolor: 'rgba(59, 130, 246, 0.2)'
+            };
+
+            const layout = {
+                polar: {
+                    radialaxis: {
+                        visible: true,
+                        range: [0, 100],
+                        tickfont: { size: 9 },
+                        gridcolor: '#E5E7EB'
+                    },
+                    angularaxis: {
+                        tickfont: { size: 8 }
+                    }
+                },
+                showlegend: false,
+                margin: { t: 30, b: 30, l: 30, r: 30 },
+                font: { size: 9 },
+                width: undefined,
+                height: 280
+            };
+
+            try {
+                Plotly.newPlot(radarDiv, [trace], layout, { 
+                    responsive: true, 
+                    displayModeBar: false,
+                    staticPlot: false
+                });
+                
+                // Force resize after a short delay to ensure proper fitting
+                setTimeout(() => {
+                    Plotly.Plots.resize(radarDiv);
+                }, 100);
+                
+                radarContainer.classList.remove('hidden');
+            } catch (error) {
+                console.error('Error creating radar chart:', error);
+                // Fallback to text display if Plotly fails
+                radarDiv.innerHTML = `
+                    <div class="text-xs text-gray-600">
+                        <div class="grid grid-cols-2 gap-2">
+                            ${metricNames.map((name, i) => 
+                                `<div class="flex justify-between">
+                                    <span>${friendlyLabels[i]}:</span>
+                                    <span class="font-mono">${metricScores[i].toFixed(1)}</span>
+                                </div>`
+                            ).join('')}
+                        </div>
+                    </div>
+                `;
+                radarContainer.classList.remove('hidden');
             }
         }
 
@@ -2055,9 +2504,114 @@ Convergence Details: {get_user_friendly_message(result.message)}
         resetButton.addEventListener('click', resetParameters);
         downloadButton.addEventListener('click', downloadResults);
 
+        // Initialize scoring preferences UI
+        function initializeScoringPreferences() {
+            const toggleButton = document.getElementById('toggle-scoring-prefs');
+            const scoringSliders = document.getElementById('scoring-sliders');
+            const applyButton = document.getElementById('apply-scoring-prefs');
+            const scoringPrefs = document.getElementById('scoring-prefs');
+
+            // Show/hide toggle functionality
+            toggleButton.addEventListener('click', () => {
+                const isHidden = scoringSliders.classList.contains('hidden');
+                if (isHidden) {
+                    scoringSliders.classList.remove('hidden');
+                    toggleButton.querySelector('.toggle-text').textContent = 'Hide';
+                } else {
+                    scoringSliders.classList.add('hidden');
+                    toggleButton.querySelector('.toggle-text').textContent = 'Show';
+                }
+            });
+
+            // Update slider value displays
+            const sliders = ['weight-regional_fit', 'weight-rms_real', 'weight-rms_imag', 'weight-reduced_chi_square', 'weight-bic'];
+            sliders.forEach(sliderId => {
+                const slider = document.getElementById(sliderId);
+                const valueDisplay = document.getElementById(sliderId + '-value');
+                
+                slider.addEventListener('input', () => {
+                    valueDisplay.textContent = slider.value;
+                });
+            });
+
+            // Apply scoring preferences
+            applyButton.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                console.log('Apply button clicked'); // Debug log
+                
+                // Collect slider values
+                const uiWeights = {};
+                sliders.forEach(sliderId => {
+                    const weightName = sliderId.replace('weight-', '');
+                    const sliderElement = document.getElementById(sliderId);
+                    if (sliderElement) {
+                        uiWeights[weightName] = parseFloat(sliderElement.value);
+                    } else {
+                        console.warn(`Slider element ${sliderId} not found`);
+                    }
+                });
+                
+                console.log('Collected UI weights:', uiWeights);
+
+                // Guard: check if analysis has been run
+                const ge = pyodide.globals.get('global_evaluator');
+                if (!currentData || !ge || ge === null) {
+                    console.log('No analysis data found. Please run analysis first.');
+                    setLoadingState(false);
+                    return;
+                }
+
+                try {
+                    setLoadingState(true, 'Updating scores...');
+                    
+                    // 1. Wait until Python finishes
+                    await pyodide.globals.get('set_ui_weights')(pyodide.toPy(uiWeights));
+                    
+                    // 2. Call helper and convert safely
+                    const evalProxy = await pyodide.globals.get('reevaluate_with_current_weights')();
+                    if (!evalProxy) {
+                        console.error('No evaluation data available');
+                        setLoadingState(false);
+                        return;
+                    }
+                    
+                    // Convert the PyProxy → plain JS object, not a Map
+                    const evaluation = (evalProxy && evalProxy.toJs)
+                          ? evalProxy.toJs({ dict_converter: Object.fromEntries })
+                          : evalProxy;
+                    
+                    console.log('Previous score:', document.getElementById('fit-quality-score')?.textContent);
+                    updateFitQualityIndicator(evaluation);
+                    console.log('New score:', evaluation.overall_score);
+                    console.log('Updated evaluation:', evaluation);
+                    
+                } catch (error) {
+                    console.error('Error applying scoring preferences:', error);
+                } finally {
+                    setLoadingState(false);
+                }
+            });
+
+            // Show scoring prefs when analysis completes
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (mutation.type === 'childList' && mutation.target.id === 'parameters-display') {
+                        if (mutation.target.children.length > 0) {
+                            scoringPrefs.classList.remove('hidden');
+                        }
+                    }
+                });
+            });
+            
+            observer.observe(document.getElementById('parameters-display'), { childList: true });
+        }
+
         // Initialize
         main();
         updateButtonState();
+        initializeScoringPreferences();
     </script>
 </body>
 </html>
