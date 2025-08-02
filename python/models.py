@@ -6,7 +6,7 @@ import pandas as pd
 import io
 from typing import Dict, Any
 from lmfit import Parameters
-
+from scipy.signal import find_peaks
 # Import from local modules (will be available after loading)
 from data_structures import FitData, FitParameters
 
@@ -343,7 +343,7 @@ class HybridDebyeLorentzModel:
         else:
             # Logarithmically space the frequencies across a slightly expanded range
             f_k_initial = np.logspace(
-                np.log10(max(1e-3, freq_min / 2)), # Avoid log(0)
+                np.log10(max(1e-3, freq_min / 2)),  # Avoid log(0)
                 np.log10(freq_max * 2),
                 N
             )

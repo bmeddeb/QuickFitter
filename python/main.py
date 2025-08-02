@@ -3,11 +3,11 @@ main.py - Main API class and legacy function wrappers
 """
 import json
 import numpy as np
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 
 # Import from local modules
 from data_structures import FitData, FitParameters
-from models import DataLoader, DjordjevicSarkarModel
+from models import DataLoader, DjordjevicSarkarModel, HybridDebyeLorentzModel, ModelRegistry
 from optimization import Optimizer
 from evaluation import FitEvaluator
 from plotting import Plotter, ReportGenerator
@@ -20,13 +20,16 @@ except ImportError:
     HAS_JS = False
 
 
-class DjordjevicSarkarFitter:
-    """Main class that orchestrates the fitting process"""
+class DielectricFitter:
+    """Main class that orchestrates the fitting process for multiple models"""
 
-    def __init__(self):
+    def __init__(self, model_key: str = 'djordjevic_sarkar', model_config: Dict[str, Any] = None):
         self.fit_data: Optional[FitData] = None
-        self.current_params: Optional[FitParameters] = None
+        self.current_params: Optional[Union[FitParameters, Dict[str, float]]] = None
         self.last_result: Optional[Any] = None
+        self.model_key = model_key
+        self.model_config = model_config or {}
+        self.model_class = ModelRegistry.get_model_class(model_key)
 
     def load_data(self, csv_content: str) -> Dict[str, Any]:
         """Load data from CSV"""
@@ -49,8 +52,8 @@ class DjordjevicSarkarFitter:
             return {"error": "No data loaded"}
 
         try:
-            # Run optimization
-            optimizer = Optimizer(self.fit_data)
+            # Run optimization with model selection
+            optimizer = Optimizer(self.fit_data, self.model_key, self.model_config)
             self.current_params, self.last_result = optimizer.optimize(method)
 
             # Evaluate fit
@@ -58,7 +61,8 @@ class DjordjevicSarkarFitter:
             evaluation = evaluator.evaluate_from_fit_result(
                 self.fit_data,
                 self.current_params,
-                self.last_result
+                self.last_result,
+                self.model_key
             )
 
             # Generate reports
@@ -66,26 +70,35 @@ class DjordjevicSarkarFitter:
                 self.fit_data,
                 self.current_params,
                 self.last_result,
-                evaluation
+                evaluation,
+                self.model_key
             )
             json_report = ReportGenerator.generate_json_report(
                 self.fit_data,
                 self.current_params,
                 self.last_result,
-                evaluation
+                evaluation,
+                self.model_key
             )
 
             # Create plot
-            plot_json = Plotter.create_plotly_plot(self.fit_data, self.current_params)
+            plot_json = Plotter.create_plotly_plot(self.fit_data, self.current_params, self.model_key)
+
+            # Handle different parameter formats
+            if isinstance(self.current_params, FitParameters):
+                fitted_params_dict = self.current_params.to_dict()
+            else:
+                fitted_params_dict = self.current_params
 
             return {
                 "report": text_report,
                 "json_data": json_report,
                 "plot_json": plot_json,
-                "fitted_params": self.current_params.to_dict(),
+                "fitted_params": fitted_params_dict,
                 "f_ghz": self.fit_data.f_ghz.tolist(),
                 "measured_dk": self.fit_data.measured_dk,
-                "measured_df": self.fit_data.measured_df
+                "measured_df": self.fit_data.measured_df,
+                "model_key": self.model_key
             }
 
         except Exception as e:
@@ -159,14 +172,15 @@ class DjordjevicSarkarFitter:
 
         # Evaluate
         evaluator = FitEvaluator()
-        evaluation = evaluator.evaluate_from_fit_result(self.fit_data, params, result)
+        evaluation = evaluator.evaluate_from_fit_result(self.fit_data, params, result, self.model_key)
 
         # Generate JSON report
         json_report = ReportGenerator.generate_json_report(
             self.fit_data,
             params,
             result,
-            evaluation
+            evaluation,
+            self.model_key
         )
 
         return json_report
@@ -178,7 +192,7 @@ class DjordjevicSarkarFitter:
             return None
 
         params = FitParameters(eps_inf, delta_eps, omega1, omega2)
-        return Plotter.create_matplotlib_plot(self.fit_data, params)
+        return Plotter.create_matplotlib_plot(self.fit_data, params, self.model_key)
 
     def get_measured_data(self) -> Dict[str, Any]:
         """Return the stored measured data"""
@@ -198,8 +212,11 @@ class DjordjevicSarkarFitter:
 # Wrapper functions for backward compatibility
 # ============================================================================
 
-# Create a global fitter instance
-_fitter = DjordjevicSarkarFitter()
+# Create a global fitter instance (backward compatibility with Djordjevic-Sarkar)
+_fitter = DielectricFitter(model_key='djordjevic_sarkar')
+
+# Create model-specific instances
+_hybrid_fitter = DielectricFitter(model_key='hybrid_debye_lorentz', model_config={'n_terms': 2})
 
 def load_data(csv_content: str) -> Tuple[np.ndarray, np.ndarray]:
     """Legacy wrapper for data loading"""
@@ -253,3 +270,48 @@ def estimate_initial_parameters(f_ghz: np.ndarray, complex_epsilon: np.ndarray, 
     fit_data = FitData(f_ghz, complex_epsilon)
     params = DjordjevicSarkarModel.estimate_initial_parameters(fit_data, pct)
     return params.to_dict()
+
+
+# ============================================================================
+# New API functions for model selection
+# ============================================================================
+
+def get_available_models() -> str:
+    """Get available dielectric models"""
+    models = ModelRegistry.get_available_models()
+    return json.dumps(models)
+
+def run_analysis_with_model(csv_content: str, model_key: str = 'djordjevic_sarkar', 
+                           model_config: Dict[str, Any] = None, method: str = 'leastsq') -> str:
+    """Run analysis with specified model"""
+    try:
+        if HAS_JS:
+            js.console.log(f"run_analysis_with_model called with model_key: {model_key}")
+            js.console.log(f"model_config: {model_config}")
+        
+        fitter = DielectricFitter(model_key, model_config or {})
+        load_result = fitter.load_data(csv_content)
+        if not load_result.get("success"):
+            return json.dumps({"error": load_result.get("error", "Failed to load data")})
+        result = fitter.run_analysis(method)
+        return json.dumps(result)
+    except Exception as e:
+        if HAS_JS:
+            js.console.error(f"Error in run_analysis_with_model: {e}")
+        import traceback
+        return json.dumps({"error": f"{str(e)}\n{traceback.format_exc()}"})
+
+def calculate_model_from_params_generic(model_key: str, params_dict: Dict[str, float], 
+                                       f_ghz_list: list) -> str:
+    """Calculate model response for generic model with arbitrary parameters"""
+    try:
+        model_class = ModelRegistry.get_model_class(model_key)
+        f_ghz = np.array(f_ghz_list)
+        model_epsilon = model_class.calculate(params_dict, f_ghz)
+        
+        return json.dumps({
+            "eps_prime": np.real(model_epsilon).tolist(),
+            "eps_double_prime": np.imag(model_epsilon).tolist()
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})

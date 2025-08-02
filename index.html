@@ -39,6 +39,22 @@
             </div>
             <div class="space-y-4">
                 <div>
+                    <label for="model-select" class="block text-sm font-medium text-gray-700">Dielectric Model</label>
+                    <select id="model-select" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                        <option value="djordjevic_sarkar" selected>Djordjevic-Sarkar (Default)</option>
+                        <option value="hybrid_debye_lorentz">Hybrid Debye-Lorentz</option>
+                    </select>
+                </div>
+                <div id="model-config" class="hidden">
+                    <label for="n-terms" class="block text-sm font-medium text-gray-700">Number of Terms (N)</label>
+                    <select id="n-terms" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                        <option value="1">1 term</option>
+                        <option value="2" selected>2 terms (Default)</option>
+                        <option value="3">3 terms</option>
+                        <option value="4">4 terms</option>
+                    </select>
+                </div>
+                <div>
                     <label for="fit-method" class="block text-sm font-medium text-gray-700">Optimization Method</label>
                     <select id="fit-method" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
                         <option value="least_squares" selected>least_squares (Default)</option>
@@ -92,31 +108,9 @@
                         </div>
                     </div>
 
-                    <div class="space-y-6">
-                        <!-- eps_inf -->
-                        <div>
-                            <label for="eps_inf_slider" class="block text-sm font-medium text-gray-700">ε<sub>inf</sub> (Epsilon Infinity)</label>
-                            <input type="range" id="eps_inf_slider" class="mt-1">
-                            <input type="number" id="eps_inf_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                        </div>
-                        <!-- delta_eps -->
-                        <div>
-                            <label for="delta_eps_slider" class="block text-sm font-medium text-gray-700">Δε (Delta Epsilon)</label>
-                            <input type="range" id="delta_eps_slider" class="mt-1">
-                            <input type="number" id="delta_eps_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                        </div>
-                        <!-- f1 -->
-                        <div>
-                            <label for="omega1_slider" class="block text-sm font-medium text-gray-700">f<sub>1</sub> (GHz)</label>
-                            <input type="range" id="omega1_slider" class="mt-1">
-                            <input type="number" id="omega1_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                        </div>
-                        <!-- f2 -->
-                        <div>
-                            <label for="omega2_slider" class="block text-sm font-medium text-gray-700">f<sub>2</sub> (GHz)</label>
-                            <input type="range" id="omega2_slider" class="mt-1">
-                            <input type="number" id="omega2_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                        </div>
+                    <!-- Dynamic Parameter Controls Container -->
+                    <div id="dynamic-parameters" class="space-y-6">
+                        <!-- Parameters will be dynamically generated here -->
                     </div>
                 </div>
             </div>
@@ -137,10 +131,6 @@
     </div>
     <footer class="text-center mt-8 text-sm text-gray-500 space-y-2">
         <p>Powered by Pyodide, lmfit, and the Djordjevic-Sarkar model.</p>
-        <div class="border-t border-gray-300 pt-2 mt-2">
-            <p class="font-semibold text-gray-700">Developers</p>
-            <p>Ben Meddeb (Software Engineer) • Amira Meddeb (Material Engineer)</p>
-        </div>
         <div class="border-t border-gray-300 pt-2 mt-2">
             <p class="font-semibold text-gray-700">Citation</p>
             <p class="italic">Meddeb, B., & Meddeb, A. (2025). QuickFitter: Interactive Dielectric Data Fitting Tool. 

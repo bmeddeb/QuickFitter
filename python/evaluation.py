@@ -6,7 +6,7 @@ import math
 from typing import Dict, List, Tuple, Any, Optional
 
 from data_structures import FitData, FitParameters, MetricResult, ReportEvaluation
-from models import DjordjevicSarkarModel
+from models import DjordjevicSarkarModel, ModelRegistry
 
 
 class FitEvaluator:
@@ -32,16 +32,23 @@ class FitEvaluator:
         self.thresholds = thresholds or FitEvaluator.DEFAULT_THRESHOLDS
         self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
 
-    def evaluate_from_fit_result(self, fit_data: FitData, params: FitParameters, result: Any) -> ReportEvaluation:
+    def evaluate_from_fit_result(self, fit_data: FitData, params, result: Any, model_key: str = 'djordjevic_sarkar') -> ReportEvaluation:
         """Evaluate fit quality from optimization result"""
-        # Calculate residuals
-        model_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        # Handle different parameter formats
+        if isinstance(params, FitParameters):
+            params_dict = params.to_dict()
+        else:
+            params_dict = params
+            
+        # Calculate residuals using the appropriate model
+        model_class = ModelRegistry.get_model_class(model_key)
+        model_epsilon = model_class.calculate(params_dict, fit_data.f_ghz)
         real_residuals = np.real(model_epsilon) - np.real(fit_data.complex_eps)
         imag_residuals = np.imag(model_epsilon) - np.imag(fit_data.complex_eps)
 
         # Build report data
         n_dat = len(real_residuals) + len(imag_residuals)
-        n_var = 4
+        n_var = len(params_dict)  # Dynamic parameter count
         chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
         red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
 

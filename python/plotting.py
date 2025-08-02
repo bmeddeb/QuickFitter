@@ -13,17 +13,24 @@ from typing import Any, Optional, Dict
 from datetime import datetime
 
 from data_structures import FitData, FitParameters, ReportEvaluation
-from models import DjordjevicSarkarModel
+from models import DjordjevicSarkarModel, ModelRegistry
 
 
 class Plotter:
     """Handles all plotting functionality"""
 
     @staticmethod
-    def create_plotly_plot(fit_data: FitData, params: FitParameters) -> str:
+    def create_plotly_plot(fit_data: FitData, params, model_key: str = 'djordjevic_sarkar') -> str:
         """Create interactive Plotly plot"""
-        # Calculate fitted model
-        fitted_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        # Handle different parameter formats
+        if isinstance(params, FitParameters):
+            params_dict = params.to_dict()
+        else:
+            params_dict = params
+            
+        # Get model class and calculate fitted model
+        model_class = ModelRegistry.get_model_class(model_key)
+        fitted_epsilon = model_class.calculate(params_dict, fit_data.f_ghz)
 
         # Create subplots
         fig = make_subplots(rows=2, cols=1, subplot_titles=('Real Permittivity', 'Loss Tangent'))
@@ -93,10 +100,17 @@ class Plotter:
         return pio.to_json(fig)
 
     @staticmethod
-    def create_matplotlib_plot(fit_data: FitData, params: FitParameters) -> bytes:
+    def create_matplotlib_plot(fit_data: FitData, params, model_key: str = 'djordjevic_sarkar') -> bytes:
         """Create downloadable matplotlib plot"""
-        # Calculate fitted model
-        fitted_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        # Handle different parameter formats
+        if isinstance(params, FitParameters):
+            params_dict = params.to_dict()
+        else:
+            params_dict = params
+            
+        # Calculate fitted model using the appropriate model
+        model_class = ModelRegistry.get_model_class(model_key)
+        fitted_epsilon = model_class.calculate(params_dict, fit_data.f_ghz)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
 
@@ -135,10 +149,17 @@ class ReportGenerator:
     """Generates formatted reports"""
 
     @staticmethod
-    def generate_text_report(fit_data: FitData, params: FitParameters, result: Any, evaluation: Optional[ReportEvaluation] = None) -> str:
+    def generate_text_report(fit_data: FitData, params, result: Any, evaluation: Optional[ReportEvaluation] = None, model_key: str = 'djordjevic_sarkar') -> str:
         """Generate a text report"""
-        # Calculate statistics
-        model_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        # Handle different parameter formats
+        if isinstance(params, FitParameters):
+            params_dict = params.to_dict()
+        else:
+            params_dict = params
+            
+        # Calculate statistics using the appropriate model
+        model_class = ModelRegistry.get_model_class(model_key)
+        model_epsilon = model_class.calculate(params_dict, fit_data.f_ghz)
         real_residuals = np.real(model_epsilon) - np.real(fit_data.complex_eps)
         imag_residuals = np.imag(model_epsilon) - np.imag(fit_data.complex_eps)
 
@@ -168,12 +189,10 @@ Model and Parameters
 ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
 
 Fitted parameters:
-    eps_inf   = {params.eps_inf:.4f}
-    delta_eps = {params.delta_eps:.4f}
-    omega1    = {params.omega1:.4e} rad/s (f1 = {params.f1_ghz:.3f} GHz)
-    omega2    = {params.omega2:.4e} rad/s (f2 = {params.f2_ghz:.3f} GHz)
-    
-    Frequency ratio: f2/f1 = {params.f2_ghz/params.f1_ghz:.1f}
+    eps_inf   = {params_dict['eps_inf']:.4f}
+    delta_eps = {params_dict.get('delta_eps', 'N/A')}
+    omega1    = {params_dict.get('omega1', 'N/A')}
+    omega2    = {params_dict.get('omega2', 'N/A')}
 
 Fit Statistics
     # data points = {n_dat}
@@ -200,10 +219,16 @@ Residual Analysis
         return report
 
     @staticmethod
-    def generate_json_report(fit_data: FitData, params: FitParameters, result: Any, evaluation: Optional[ReportEvaluation] = None) -> Dict[str, Any]:
+    def generate_json_report(fit_data: FitData, params, result: Any, evaluation: Optional[ReportEvaluation] = None, model_key: str = 'djordjevic_sarkar') -> Dict[str, Any]:
         """Generate a JSON report"""
-        # Calculate statistics
-        model_epsilon = DjordjevicSarkarModel.calculate(params.to_dict(), fit_data.f_ghz)
+        # Handle different parameter formats
+        if isinstance(params, FitParameters):
+            params_dict = params.to_dict()
+        else:
+            params_dict = params
+        # Calculate statistics using the appropriate model
+        model_class = ModelRegistry.get_model_class(model_key)
+        model_epsilon = model_class.calculate(params_dict, fit_data.f_ghz)
         real_residuals = np.real(model_epsilon) - np.real(fit_data.complex_eps)
         imag_residuals = np.imag(model_epsilon) - np.imag(fit_data.complex_eps)
 
@@ -222,16 +247,12 @@ Residual Analysis
                     if result.covar[i, i] > 0 and result.covar[j, j] > 0:
                         corr_matrix[i, j] = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
 
+        model_info = ModelRegistry.get_model(model_key)
         json_report = {
-            "model": "Djordjevic-Sarkar",
+            "model": model_info['name'],
             "timestamp": datetime.now().isoformat(),
             "parameters": {
-                "eps_inf": params.eps_inf,
-                "delta_eps": params.delta_eps,
-                "omega1": params.omega1,
-                "omega2": params.omega2,
-                "f1_ghz": params.f1_ghz,
-                "f2_ghz": params.f2_ghz
+                **params_dict
             },
             "fit_statistics": {
                 "n_data_points": n_dat,
