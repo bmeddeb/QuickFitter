@@ -296,11 +296,13 @@ class HybridModelEvaluator:
     """
     Evaluates the quality of a Hybrid Debye-Lorentz fit report.
     """
-    HYBRID_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
-        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Consider reducing number of terms if overfitting."),
-        "rms_real":           (0.005, 0.010, 0.020, "Check term overlap or add more terms."),
-        "rms_imag":           (0.001, 0.002, 0.005, "Adjust gamma values for better loss fitting."),
-        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias."),
+    # --- Consolidated, noise-adaptive thresholds ---
+    DEFAULT_THRESHOLDS = {
+        # name : (mult_godly, mult_excellent, mult_good, suggestion)
+        "reduced_chi_square": (1.0, 5.0, 10.0, "Check model overfitting or missing physics."),
+        "rms_real":           (1.0, 2.0, 5.0, "Large RMS in Dk—check model adequacy."),
+        "rms_imag":           (1.0, 2.0, 5.0, "Large RMS in Df—adjust parameters."),
+        "mean_residual":      (1.0, 2.0, 5.0, "Systematic bias detected."),
     }
 
     HYBRID_WEIGHTS: Dict[str, float] = {
@@ -318,8 +320,7 @@ class HybridModelEvaluator:
         'complexity_penalty': 2.0
     }
 
-    def __init__(self, thresholds=None, weights=None):
-        self.thresholds = thresholds or self.HYBRID_THRESHOLDS
+    def __init__(self, weights=None):
         self.weights = weights or self.HYBRID_WEIGHTS
 
     @classmethod
@@ -336,7 +337,7 @@ class HybridModelEvaluator:
         if corr_matrix and isinstance(corr_matrix, list):
             param_names = ['eps_inf']
             for i in range(n_terms):
-                param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}'])
+                param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}', f'beta{i+1}'])
 
             try:
                 for i in range(len(corr_matrix)):
@@ -353,9 +354,9 @@ class HybridModelEvaluator:
             'chi_square': fit_stats.get('chi_square', 0),
             'reduced_chi_square': fit_stats.get('reduced_chi_square', 0),
             'rms_real': residuals.get('real_part', {}).get('rms', 0),
-            'rms_imag': residuals.get('imaginary_part', {}).get('rms', 0),
+            'rms_imag': residuals.get('loss_tangent', {}).get('rms', 0),  # Now using loss tangent
             'mean_real': residuals.get('real_part', {}).get('mean', 0),
-            'mean_imag': residuals.get('imaginary_part', {}).get('mean', 0),
+            'mean_imag': residuals.get('loss_tangent', {}).get('mean', 0),  # Now using loss tangent
             'correlations': correlations,
             'params': params,
             'n_terms': n_terms
@@ -389,6 +390,8 @@ class HybridModelEvaluator:
                     raise ValueError(f"alpha{i+1} must be in (0,1]")
                 if params[f'gamma{i+1}'] < 0:
                     raise ValueError(f"gamma{i+1} must be non-negative")
+                if params[f'beta{i+1}'] < 0 or params[f'beta{i+1}'] > 1:
+                    raise ValueError(f"beta{i+1} must be in [0,1]")
 
         except (TypeError, ValueError, KeyError) as e:
             raise ValueError(f"Invalid report data: {e}")
@@ -480,7 +483,7 @@ class HybridModelEvaluator:
         warnings = []
 
         # Check correlations between same parameter types
-        param_types = ['A', 'tau', 'alpha', 'gamma']
+        param_types = ['A', 'tau', 'alpha', 'gamma', 'beta']
         for ptype in param_types:
             for i in range(n_terms):
                 for j in range(i+1, n_terms):
@@ -542,28 +545,35 @@ class HybridModelEvaluator:
                                      f_ghz: List[float]) -> Tuple[float, List[str]]:
         """Check for systematic errors in different frequency regions."""
         warnings = []
-
-        # Divide frequency range into thirds
-        n_points = len(f_ghz)
-        third = n_points // 3
+        
+        f = np.array(f_ghz)
+        logf = np.log10(f)
+        log_min, log_max = logf.min(), logf.max()
+        
+        # Breakpoints dividing log-space into thirds
+        f_break1 = 10**(log_min + (log_max - log_min)/3)
+        f_break2 = 10**(log_min + 2*(log_max - log_min)/3)
 
         regions = {
-            'low': (0, third),
-            'mid': (third, 2*third),
-            'high': (2*third, n_points)
+            'low':  f <= f_break1,
+            'mid':  (f > f_break1) & (f <= f_break2),
+            'high': f > f_break2
         }
 
         max_regional_error = 0
 
-        for region_name, (start, end) in regions.items():
-            region_real = residuals_real[start:end]
-            region_imag = residuals_imag[start:end]
+        for region_name, mask in regions.items():
+            if not np.any(mask):
+                continue
+                
+            region_real = np.array(residuals_real)[mask]
+            region_imag = np.array(residuals_imag)[mask]
 
             # Check for systematic bias in each region
-            mean_real = np.mean(region_real)
-            mean_imag = np.mean(region_imag)
-            rms_real = np.sqrt(np.mean(np.array(region_real)**2))
-            rms_imag = np.sqrt(np.mean(np.array(region_imag)**2))
+            mean_real = region_real.mean()
+            mean_imag = region_imag.mean()
+            rms_real = np.sqrt(np.mean(region_real**2))
+            rms_imag = np.sqrt(np.mean(region_imag**2))
 
             # Score based on worst regional RMS
             regional_error = max(rms_real, rms_imag * 10)  # Weight imaginary part more
@@ -587,8 +597,11 @@ class HybridModelEvaluator:
 
         return score, warnings
 
-    def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
-        """Validates and evaluates a hybrid model fit report."""
+    def evaluate(self, report: Dict[str, Any], noise_levels: Dict[str, float] = None) -> ReportEvaluation:
+        """
+        Validate & evaluate using thresholds scaled to dataset noise.
+        noise_levels should provide {'rms_real': sigma_Dk, 'rms_imag': sigma_Df}.
+        """
         required = {
             'n_data_points', 'n_variables', 'reduced_chi_square',
             'rms_real', 'rms_imag', 'mean_real', 'mean_imag',
@@ -605,6 +618,22 @@ class HybridModelEvaluator:
         f_ghz = report.get('f_ghz', [])
 
         self._validate_report(report)
+
+        # Estimate noise if not provided
+        if noise_levels is None:
+            noise_levels = {
+                'rms_real': np.std(report.get('residuals_real', [0])),
+                'rms_imag': np.std(report.get('residuals_imag', [0])),
+                'reduced_chi_square': 1.0,  # Use 1.0 as base for chi-square
+                'mean_residual': min(np.std(report.get('residuals_real', [0])), 
+                                   np.std(report.get('residuals_imag', [0])))
+            }
+
+        # Build scaled thresholds
+        scaled_thresh = {}
+        for name, (mg, me, mgd, sugg) in self.DEFAULT_THRESHOLDS.items():
+            σ = noise_levels.get(name, 1.0)
+            scaled_thresh[name] = (mg*σ, me*σ, mgd*σ, sugg)
 
         metrics: Dict[str, MetricResult] = {}
         suggestions: List[str] = []
@@ -626,25 +655,19 @@ class HybridModelEvaluator:
         if dpv_sug:
             suggestions.append(dpv_sug)
 
-        # Standard scalar metrics with adjusted thresholds for hybrid model
+        # Standard scalar metrics using scaled thresholds
         mean_res = max(abs(report['mean_real']), abs(report['mean_imag']))
 
-        # Tighten thresholds for better discrimination
-        adjusted_thresholds = {
-            "reduced_chi_square": (1e-5, 1e-4, 1e-3, "Model may be overfitting or missing physics."),
-            "rms_real":           (0.002, 0.005, 0.010, "Large RMS in Dk - check model adequacy."),
-            "rms_imag":           (0.0002, 0.0005, 0.001, "Large RMS in Df - adjust parameters."),
-            "mean_residual":      (1e-5, 1e-4, 5e-4, "Systematic bias detected."),
-        }
-
+        # Use scaled thresholds for evaluation
         report_vals = dict(report)
         report_vals['mean_residual'] = mean_res
 
-        for name, (g, e, gd, sug) in adjusted_thresholds.items():
-            val = report_vals.get(name, 0)
-            sc, cat = self._evaluate_scalar(val, (g, e, gd))
-            sugg = sug if cat == "Poor" else None
-            metrics[name] = MetricResult(name, sc, cat, val, sugg)
+        for metric in ('rms_real', 'rms_imag', 'mean_residual', 'reduced_chi_square'):
+            g, e, gd, suggestion = scaled_thresh[metric]
+            val = report_vals.get(metric, 0)
+            score, cat = self._evaluate_scalar(val, (g, e, gd))
+            sugg = suggestion if cat == "Poor" else None
+            metrics[metric] = MetricResult(metric, score, cat, val, sugg)
             if sugg:
                 suggestions.append(sugg)
 
@@ -756,26 +779,12 @@ class HybridModelEvaluator:
             100 - complexity_score, None
         )
 
-        # Calculate overall score with adjusted weights
-        weights = {
-            'dpv': 1.0,
-            'reduced_chi_square': 2.0,
-            'rms_real': 3.0,
-            'rms_imag': 3.0,
-            'mean_residual': 2.0,
-            'regional_fit': 4.0,  # High weight for regional fit quality
-            'tau_separation': 2.0,
-            'min_contribution': 3.0,  # High weight for contribution issues
-            'max_contribution': 2.0,
-            'correlation': 4.0,  # High weight for correlation issues
-            'like_param_correlation': 2.0,
-            'complexity_penalty': 2.0
-        }
-
-        total_weight = sum(weights.get(k, 0) for k in metrics.keys())
+        # Calculate overall score using class weights
+        weights = self.weights
+        total_weight = sum(weights.get(k, 0) for k in metrics)
         overall_score = sum(
             metrics[k].score * weights.get(k, 1)
-            for k in metrics.keys()
+            for k in metrics
             if k in weights
         ) / total_weight
 
@@ -821,38 +830,46 @@ def load_data(csv_content):
         raise ValueError(f"Failed to parse CSV: {e}")
 
 def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
-    """Estimate initial parameters for hybrid model with n_terms"""
+    """
+    Generates robust initial guesses for Hybrid model parameters.
+    Uses logarithmic spacing for tau values to better cover frequency extremes.
+    """
     dk = np.real(complex_epsilon)
-    df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
+    n_pts = dk.size
 
-    # eps_inf is typically the high-frequency limit
-    eps_inf_init = dk[-1] if len(dk) > 0 else 1.0
+    # High-frequency permittivity using plateau averaging
+    if n_pts >= 3:
+        n_avg = max(3, int(n_pts * 0.05))            # at least 3 points or 5%
+        eps_inf_init = float(np.mean(dk[-n_avg:]))   # plateau average
+    else:
+        eps_inf_init = float(dk[-1]) if n_pts else 1.0
 
-    # Divide frequency range into n_terms sections
-    f_sections = np.array_split(f_ghz, n_terms)
+    # Compute log-spaced "center" frequencies
+    f_min, f_max = f_ghz.min(), f_ghz.max()
+    log_min, log_max = np.log10(f_min), np.log10(f_max)
+    # n_terms points between log_min and log_max, exclusive of endpoints:
+    f_centers = np.logspace(log_min, log_max, n_terms + 2)[1:-1]
 
     params = {'eps_inf': eps_inf_init}
+    delta_eps_total = dk[0] - dk[-1] if dk.size else 1.0
+    A_init = delta_eps_total / n_terms
 
-    for i in range(n_terms):
-        # Initial amplitude - spread the total delta across terms
-        delta_eps_total = dk[0] - dk[-1] if len(dk) > 0 else 1.0
-        A_init = delta_eps_total / n_terms
+    for i, f_center in enumerate(f_centers):
+        # Geometric spacing => one decade-even coverage
+        tau_init = 1 / (2 * np.pi * f_center * 1e9)
 
-        # Initial relaxation time - spread logarithmically across frequency range
-        if len(f_sections[i]) > 0:
-            f_center = np.median(f_sections[i])
-            tau_init = 1 / (2 * np.pi * f_center * 1e9)
-        else:
-            tau_init = 1e-10 * (10 ** i)  # Logarithmic spacing
+        # Keep α, γ defaults or refine later
+        alpha_init = 0.8
+        gamma_init = 0.9
+        
+        # Initial beta value (mix parameter)
+        beta_init = 0.5
 
-        # Initial alpha and gamma values
-        alpha_init = 0.8  # Between 0 and 1
-        gamma_init = 0.9  # Between 0 and 1
-
-        params[f'A{i+1}'] = A_init
-        params[f'tau{i+1}'] = tau_init
+        params[f'A{i+1}']     = A_init
+        params[f'tau{i+1}']   = tau_init
         params[f'alpha{i+1}'] = alpha_init
         params[f'gamma{i+1}'] = gamma_init
+        params[f'beta{i+1}']  = beta_init
 
     return params
 
@@ -870,91 +887,110 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
         tau = float(params[f'tau{i+1}'])
         alpha = float(params[f'alpha{i+1}'])
         gamma = float(params[f'gamma{i+1}'])
+        beta = float(params[f'beta{i+1}'])        # new mix parameter
 
-        # Hybrid term combining Debye and Lorentz characteristics
-        # Using Cole-Cole modification for Debye part and damped Lorentz for resonance
+        # Compute the complex argument once
         omega_tau = omega * tau
+        ph = np.log(1j * omega_tau)        # consistent complex logarithm
+        # Raise to fractional power via exp(alpha * log(...))
+        debye_term = A / (1 + np.exp(alpha * ph))
 
-        # Modified Debye term with alpha parameter
-        debye_term = A / (1 + (1j * omega_tau) ** alpha)
+        # Lorentz-like term (corrected as in Problem 1)
+        omega_0 = 1 / tau
+        lorentz_term = A * omega_0**2 / (omega_0**2 - omega**2 + 1j * gamma * omega)
 
-        # Lorentz-like resonance term with gamma damping
-        omega_0 = 1 / tau  # Resonance frequency
-        lorentz_term = A * omega_0**2 / (omega_0**2 - omega**2 - 1j * gamma * omega * omega_0)
-
-        # Combine both contributions with weighting
-        weight = 0.5  # Equal weighting between Debye and Lorentz
-        complex_epsilon = complex_epsilon + weight * debye_term + (1 - weight) * lorentz_term
+        # **use beta to blend**
+        complex_epsilon += beta * debye_term + (1 - beta) * lorentz_term
 
     return complex_epsilon
 
-def residual(params, f_ghz, complex_epsilon_data, n_terms):
+def residual(params, f_ghz, complex_epsilon_data, n_terms, weight_df=2.0):
     p_dict = params.valuesdict()
-    model_epsilon = calculate_hybrid_model(p_dict, f_ghz, n_terms)
+    eps_mod = calculate_hybrid_model(p_dict, f_ghz, n_terms)
 
-    real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
-    imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
+    # Real-part residual (Dk)
+    real_mod = np.real(eps_mod)
+    real_meas = np.real(complex_epsilon_data)
+    res_real = real_mod - real_meas
 
-    # Weight imaginary part more heavily for better loss fitting
-    weight_imag = 2.0
-    return np.concatenate([real_residual, weight_imag * imag_residual])
+    # Loss-tangent residual (Df)
+    df_mod  = -np.imag(eps_mod) / real_mod
+    df_meas = -np.imag(complex_epsilon_data) / real_meas
+    res_df  = df_mod - df_meas
 
-def calculate_jacobian(params_dict, f_ghz, n_terms, h=1e-8):
-    """Calculate Jacobian matrix using finite differences"""
+    # Stack with heavier weighting on Df
+    return np.concatenate([
+        res_real,
+        weight_df * res_df
+    ])
+
+def _dict_to_parameters(params_dict: dict):
+    """Helper: turn a simple dict into an lmfit.Parameters object."""
+    p = Parameters()
+    for name, val in params_dict.items():
+        p.add(name, value=val)
+    return p
+
+def calculate_jacobian(params_dict, f_ghz, complex_epsilon_data, n_terms, h=1e-8):
+    """
+    Compute the Jacobian of the *residual* function w.r.t. each parameter
+    by finite differences.
+    """
+    # Parameter ordering must match what you pass to residual()
     param_names = ['eps_inf']
     for i in range(n_terms):
-        param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}'])
+        param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}', f'beta{i+1}'])
 
-    n_params = len(param_names)
-    n_data = len(f_ghz) * 2  # real and imag parts
+    # Base residual vector (length = 2*N_data: Dk + weighted Df)
+    base_params = _dict_to_parameters(params_dict)
+    base_res = residual(base_params, f_ghz, complex_epsilon_data, n_terms)  # returns 1D np.array
+    n_data = base_res.size
 
-    jacobian = np.zeros((n_data, n_params))
+    # Prepare Jacobian matrix: rows = data-points, cols = parameters
+    J = np.zeros((n_data, len(param_names)))
 
-    # Base model
-    base_model = calculate_hybrid_model(params_dict, f_ghz, n_terms)
-    base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
+    # Finite-difference for each parameter
+    for i, name in enumerate(param_names):
+        # Make a fresh copy for each perturbation
+        perturbed = params_dict.copy()
+        perturbed[name] += h
 
-    # Calculate derivatives
-    for i, param_name in enumerate(param_names):
-        params_plus = params_dict.copy()
-        params_plus[param_name] += h
+        p_plus = _dict_to_parameters(perturbed)
+        res_plus = residual(p_plus, f_ghz, complex_epsilon_data, n_terms)
 
-        model_plus = calculate_hybrid_model(params_plus, f_ghz, n_terms)
-        residual_plus = np.concatenate([np.real(model_plus), np.imag(model_plus)])
+        # Derivative ≈ [ r(θ+h) – r(θ) ] / h
+        J[:, i] = (res_plus - base_res) / h
 
-        jacobian[:, i] = (residual_plus - base_residual) / h
+    return J
 
-    return jacobian
+def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data, n_terms):
+    """
+    Calculate correlation matrix from the Jacobian of the *residual* function.
+    Returns a (P×P) numpy array, or raises a ValueError if it cannot be computed.
+    """
+    # Build Jacobian on residuals (see Problem 6)
+    J = calculate_jacobian(params_dict, f_ghz, complex_epsilon_data, n_terms)
 
-def calculate_correlation_matrix(params_dict, f_ghz, n_terms):
-    """Calculate correlation matrix from Jacobian"""
-    try:
-        # Calculate Jacobian
-        J = calculate_jacobian(params_dict, f_ghz, n_terms)
+    # Compute JTJ
+    JTJ = J.T @ J
 
-        # Calculate covariance matrix: (J^T J)^-1
-        JTJ = np.dot(J.T, J)
+    # Regularize if ill-conditioned
+    cond = np.linalg.cond(JTJ)
+    if cond > 1e12:
+        raise ValueError(f"Jacobian matrix ill-conditioned (cond={cond:.2e})")
 
-        # Add small regularization to ensure positive definite
-        JTJ += np.eye(JTJ.shape[0]) * 1e-10
+    # Invert
+    cov = np.linalg.inv(JTJ + np.eye(JTJ.shape[0]) * 1e-12)
 
-        # Calculate covariance
-        cov_matrix = np.linalg.inv(JTJ)
-
-        # Convert to correlation matrix
-        std_devs = np.sqrt(np.diag(cov_matrix))
-        corr_matrix = np.zeros_like(cov_matrix)
-
-        for i in range(len(std_devs)):
-            for j in range(len(std_devs)):
-                if std_devs[i] > 0 and std_devs[j] > 0:
-                    corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
-                else:
-                    corr_matrix[i, j] = 0
-
-        return corr_matrix
-    except:
-        return None
+    # Build correlation
+    stddevs = np.sqrt(np.diag(cov))
+    
+    # Check for zero or negative variances
+    if np.any(stddevs <= 0):
+        raise ValueError("Invalid variances detected in covariance matrix")
+    
+    corr = cov / np.outer(stddevs, stddevs)
+    return corr
 
 def get_user_friendly_message(technical_message):
     """Convert technical optimization messages to user-friendly language"""
@@ -990,22 +1026,28 @@ def get_user_friendly_message(technical_message):
 
 def format_correlation_matrix(corr_matrix, n_terms):
     """Format correlation matrix for display"""
-    if corr_matrix is None:
+    if corr_matrix is None or corr_matrix.size == 0:
         return "Unable to calculate correlation matrix"
 
     param_names = ['eps_inf']
     for i in range(n_terms):
-        param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}'])
+        param_names.extend([f'A{i+1}', f'tau{i+1}', f'alpha{i+1}', f'gamma{i+1}', f'beta{i+1}'])
 
     result = "Correlations:\\n"
 
-    for i, param1 in enumerate(param_names):
-        for j, param2 in enumerate(param_names):
-            if j > i:  # Only show upper triangle
-                if i < len(corr_matrix) and j < len(corr_matrix):
-                    correlation = corr_matrix[i, j]
-                    if abs(correlation) > 0.1:  # Only show significant correlations
-                        result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
+    # Check matrix dimensions
+    if len(corr_matrix.shape) != 2 or corr_matrix.shape[0] != corr_matrix.shape[1]:
+        return "Invalid correlation matrix dimensions"
+
+    max_idx = min(len(param_names), corr_matrix.shape[0])
+    
+    for i in range(max_idx):
+        for j in range(i+1, max_idx):  # Only show upper triangle
+            correlation = corr_matrix[i, j]
+            if abs(correlation) > 0.1:  # Only show significant correlations
+                param1 = param_names[i] if i < len(param_names) else f"param_{i}"
+                param2 = param_names[j] if j < len(param_names) else f"param_{j}"
+                result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
 
     return result
 
@@ -1079,35 +1121,110 @@ def run_analysis(csv_content, n_terms, method):
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_terms)
     params = Parameters()
 
-    # Add eps_inf
-    dk_data = np.real(complex_epsilon_data)
-    params.add('eps_inf', value=initial_params['eps_inf'], min=0.5, max=dk_data.max())
+    # --- Compute data-driven bounds ---
+    dk_vals = np.real(complex_epsilon_data)
+    dk_min, dk_max = dk_vals.min(), dk_vals.max()
+    delta_eps = dk_max - dk_min
+    
+    # Bound eps_inf to within ±20% of high-freq plateau
+    eps_inf_min = max(0.5 * dk_max, 0.0)
+    eps_inf_max = 1.2 * dk_max
 
-    # Add parameters for each term
+    # Frequency span (GHz → Hz)
+    f_min_hz = f_ghz.min() * 1e9
+    f_max_hz = f_ghz.max() * 1e9
+    # Relaxation time bounds: [0.1/(2πf_max), 10/(2πf_min)]
+    tau_min = 0.1 / (2 * np.pi * f_max_hz)
+    tau_max = 10.0 / (2 * np.pi * f_min_hz)
+
+    # Register eps_inf
+    params.add(
+        'eps_inf',
+        value=initial_params['eps_inf'],
+        min=eps_inf_min,
+        max=eps_inf_max
+    )
+
+    # Register each term with data-driven bounds
     for i in range(n_terms):
-        params.add(f'A{i+1}', value=initial_params[f'A{i+1}'], min=0, max=10)
-        params.add(f'tau{i+1}', value=initial_params[f'tau{i+1}'], min=1e-13, max=1e-6)
-        params.add(f'alpha{i+1}', value=initial_params[f'alpha{i+1}'], min=0.1, max=1.0)
-        params.add(f'gamma{i+1}', value=initial_params[f'gamma{i+1}'], min=0.1, max=2.0)
+        # Amplitude
+        params.add(
+            f'A{i+1}',
+            value=initial_params[f'A{i+1}'],
+            min=0.0,
+            max=1.2 * delta_eps
+        )
+        # Relaxation time
+        params.add(
+            f'tau{i+1}',
+            value=initial_params[f'tau{i+1}'],
+            min=tau_min,
+            max=tau_max
+        )
+        # Debye exponent
+        params.add(
+            f'alpha{i+1}',
+            value=initial_params[f'alpha{i+1}'],
+            min=0.01,
+            max=1.0
+        )
+        # Damping
+        params.add(
+            f'gamma{i+1}',
+            value=initial_params[f'gamma{i+1}'],
+            min=0.0,
+            max=10.0
+        )
+        # Mix parameter
+        params.add(
+            f'beta{i+1}',
+            value=initial_params[f'beta{i+1}'],
+            min=0.0,
+            max=1.0
+        )
 
-    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_terms))
+    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_terms, 2.0))
     result = minimizer.minimize(method=method)
 
     fit_params = {p: float(v.value) for p, v in result.params.items()}
 
     # Calculate residuals and statistics
     fitted_epsilon = calculate_hybrid_model(result.params.valuesdict(), f_ghz, n_terms)
-    real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
-    imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon_data)
+    
+    # Compute residuals exactly as in the residual function
+    real_mod = np.real(fitted_epsilon)
+    real_meas = np.real(complex_epsilon_data)
+    res_real = real_mod - real_meas
 
-    n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 1 + 4 * n_terms  # eps_inf + 4 params per term
-    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
-    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+    # Compute loss-tangent residuals
+    df_mod = -np.imag(fitted_epsilon) / real_mod
+    df_meas = -np.imag(complex_epsilon_data) / real_meas
+    res_df = df_mod - df_meas
 
-    # Calculate correlation matrix
-    corr_matrix = calculate_correlation_matrix(result.params.valuesdict(), f_ghz, n_terms)
-    corr_text = format_correlation_matrix(corr_matrix, n_terms)
+    # Same weight used in residual() function
+    weight_df = 2.0
+
+    # Build the residual vector exactly as in residual()
+    resid_vec = np.concatenate([res_real, weight_df * res_df])
+
+    # Now χ² is sum of squares of that exact vector
+    chi_sqr = np.sum(resid_vec**2)
+    n_dat = resid_vec.size
+    n_var = 1 + 5 * n_terms  # eps_inf + 5 params per term (A, tau, alpha, gamma, beta)
+    dof = n_dat - n_var if n_dat > n_var else 1
+    red_chi_sqr = chi_sqr / dof
+
+    # Calculate correlation matrix with error handling
+    try:
+        corr_matrix = calculate_correlation_matrix(result.params.valuesdict(), f_ghz, complex_epsilon_data, n_terms)
+        corr_text = format_correlation_matrix(corr_matrix, n_terms)
+    except Exception as e:
+        # Log the error, but continue
+        logger.warning(f"Could not compute correlation matrix: {e}")
+        # Fallback: zeros of the right size
+        P = 1 + 5 * n_terms  # eps_inf + 5 params per term (A, tau, alpha, gamma, beta)
+        corr_matrix = np.zeros((P, P))
+        corr_text = f"Correlation matrix computation failed: {e}"
 
     # Create JSON data structure first (before using it)
     json_data = {
@@ -1123,39 +1240,43 @@ def run_analysis(csv_content, n_terms, method):
         },
         "residual_analysis": {
             "real_part": {
-                "mean": float(np.mean(real_residuals)),
-                "std_dev": float(np.std(real_residuals)),
-                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+                "mean": float(np.mean(res_real)),
+                "std_dev": float(np.std(res_real)),
+                "rms": float(np.sqrt(np.mean(res_real**2)))
             },
-            "imaginary_part": {
-                "mean": float(np.mean(imag_residuals)),
-                "std_dev": float(np.std(imag_residuals)),
-                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            "loss_tangent": {
+                "mean": float(np.mean(res_df)),
+                "std_dev": float(np.std(res_df)),
+                "rms": float(np.sqrt(np.mean(res_df**2)))
             }
         },
-        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+        "correlation_matrix": corr_matrix.tolist()
     }
 
-    # Calculate information criteria
-    # AIC = 2k - 2ln(L), where k is number of parameters
-    # For least squares: AIC = n*ln(RSS/n) + 2k
-    # BIC = ln(n)*k - 2ln(L) = n*ln(RSS/n) + k*ln(n)
-    # AIC_c = AIC + 2k(k+1)/(n-k-1) for small sample correction
+    # Calculate information criteria with proper normalization
+    # 1) Estimate/mechanism to supply noise levels σ_Dk, σ_Df:
+    sigma_real = np.std(res_real)   # or instrument spec
+    sigma_df   = np.std(res_df)     # ditto
 
-    rss = chi_sqr  # Residual sum of squares
-    n = n_dat  # Number of data points
-    k = n_var  # Number of parameters
+    # 2) Use the exact weighted residuals, then normalize
+    weighted_res_real = res_real / sigma_real
+    weighted_res_df = (weight_df * res_df) / sigma_df
 
-    # Calculate log-likelihood assuming normally distributed errors
-    # For least squares: -2*log(L) ≈ n*log(RSS/n) + n*log(2π) + n
-    # We'll use the simplified form for AIC/BIC
+    # 3) Stack into effective residual vector (consistent with optimization)
+    resid_eff = np.concatenate([weighted_res_real, weighted_res_df])
+    n_eff = resid_eff.size
 
-    aic = n * np.log(rss/n) + 2 * k
-    bic = n * np.log(rss/n) + k * np.log(n)
+    # 4) Effective chi-square
+    chi2_eff = np.sum(resid_eff**2)
 
-    # Corrected AIC for small samples
-    if n - k - 1 > 0:
-        AIC_c = aic + (2 * k * (k + 1)) / (n - k - 1)
+    # 5) AIC / BIC using the Gaussian-noise log-likelihood
+    # (dropping constant ln(2π) term)
+    aic = chi2_eff + 2 * n_var
+    bic = chi2_eff + n_var * np.log(n_eff)
+
+    # 6) (Optional) small-sample AICc
+    if n_eff - n_var - 1 > 0:
+        AIC_c = aic + (2*n_var*(n_var+1))/(n_eff - n_var - 1)
     else:
         AIC_c = np.inf
 
@@ -1164,9 +1285,11 @@ def run_analysis(csv_content, n_terms, method):
         'AIC': float(aic),
         'BIC': float(bic),
         'AIC_c': float(AIC_c),
-        'n_data': n,
-        'n_params': k,
-        'RSS': float(rss)
+        'n_data': n_eff,
+        'n_params': n_var,
+        'chi2_eff': float(chi2_eff),
+        'sigma_real': float(sigma_real),
+        'sigma_df': float(sigma_df)
     }
 
     # Create model description
@@ -1175,9 +1298,9 @@ def run_analysis(csv_content, n_terms, method):
 ε(ω) = ε_inf + Σ[i=1 to {n_terms}] H_i(ω)
 
 where each hybrid term H_i combines Debye and Lorentz characteristics:
-H_i(ω) = 0.5 * A_i / (1 + (jωτ_i)^α_i) + 0.5 * A_i * ω_0i² / (ω_0i² - ω² - jγ_i*ω*ω_0i)
+H_i(ω) = β_i * A_i / (1 + (jωτ_i)^α_i) + (1-β_i) * A_i * ω_0i² / (ω_0i² - ω² - jγ_i*ω)
 
-with ω_0i = 1/τ_i as the resonance frequency.
+with ω_0i = 1/τ_i as the resonance frequency and β_i as the mixing parameter.
 """
 
     # Format parameters for report
@@ -1189,6 +1312,7 @@ with ω_0i = 1/τ_i as the resonance frequency.
         params_text += f"        tau{i+1}   = {fit_params[f'tau{i+1}']:.4e} s\\n"
         params_text += f"        alpha{i+1} = {fit_params[f'alpha{i+1}']:.4f}\\n"
         params_text += f"        gamma{i+1} = {fit_params[f'gamma{i+1}']:.4f}\\n"
+        params_text += f"        beta{i+1}  = {fit_params[f'beta{i+1}']:.4f}\\n"
         params_text += f"        f_0{i+1}   = {1/(2*np.pi*fit_params[f'tau{i+1}'])/1e9:.4f} GHz\\n"
 
     # Create full report
@@ -1210,14 +1334,14 @@ Fit Statistics
 Residual Analysis
 --------------------------------------------------
     Real Part (Dk):
-        Mean: {np.mean(real_residuals):.4f}
-        Std Dev: {np.std(real_residuals):.4f}
-        RMS: {np.sqrt(np.mean(real_residuals**2)):.4f}
+        Mean: {np.mean(res_real):.4f}
+        Std Dev: {np.std(res_real):.4f}
+        RMS: {np.sqrt(np.mean(res_real**2)):.4f}
 
-    Imaginary Part (Loss Factor):
-        Mean: {np.mean(imag_residuals):.4f}
-        Std Dev: {np.std(imag_residuals):.4f}
-        RMS: {np.sqrt(np.mean(imag_residuals**2)):.4f}
+    Loss Tangent (Df):
+        Mean: {np.mean(res_df):.4f}
+        Std Dev: {np.std(res_df):.4f}
+        RMS: {np.sqrt(np.mean(res_df**2)):.4f}
 
 Term Analysis
 --------------------------------------------------"""
@@ -1231,16 +1355,19 @@ Term Analysis
         contribution = fit_params[f'A{i+1}']/total_A*100 if total_A > 0 else 0
         alpha = fit_params[f'alpha{i+1}']
         gamma = fit_params[f'gamma{i+1}']
+        beta = fit_params[f'beta{i+1}']
 
         character = 'Debye-like' if alpha < 0.5 else 'Hybrid' if alpha < 0.8 else 'Lorentz-like'
         damping = 'Low' if gamma < 0.5 else 'High' if gamma > 1.5 else 'Moderate'
+        mix_character = 'Pure Debye' if beta > 0.9 else 'Pure Lorentz' if beta < 0.1 else f'{beta*100:.0f}% Debye, {(1-beta)*100:.0f}% Lorentz'
 
         full_report += f"""
     Term {i+1}:
         Resonance frequency: {f0:.3f} GHz
         Relative contribution: {contribution:.1f}%
         Character: {character} (α={alpha:.2f})
-        Damping: {damping} (γ={gamma:.2f})"""
+        Damping: {damping} (γ={gamma:.2f})
+        Mixing: {mix_character} (β={beta:.2f})"""
 
     # Add information criteria section
     ic_section = ""
@@ -1274,13 +1401,21 @@ Convergence Details: {get_user_friendly_message(result.message)}
         report_data = HybridModelEvaluator.from_json_report(json_data)
         # Add additional data for better evaluation
         report_data['f_ghz_range'] = (min(f_ghz), max(f_ghz))
-        report_data['residuals_real'] = real_residuals.tolist()
-        report_data['residuals_imag'] = imag_residuals.tolist()
+        report_data['residuals_real'] = res_real.tolist()
+        report_data['residuals_imag'] = res_df.tolist()  # Now using loss tangent residuals
         report_data['f_ghz'] = f_ghz.tolist()
         # Add measured data
         report_data['measured_dk'] = np.real(complex_epsilon_data).tolist()
         report_data['measured_df'] = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
-        evaluation = evaluator.evaluate(report_data)
+        
+        # Pass noise levels to evaluator
+        noise_levels = {
+            'rms_real': sigma_real,
+            'rms_imag': sigma_df,
+            'reduced_chi_square': 1.0,
+            'mean_residual': min(sigma_real, sigma_df)
+        }
+        evaluation = evaluator.evaluate(report_data, noise_levels)
         json_data['evaluation'] = evaluation.to_dict()
     except Exception as e:
         logger.warning(f"Could not evaluate fit: {e}")
@@ -1414,6 +1549,15 @@ Convergence Details: {get_user_friendly_message(result.message)}
                                 <span class="text-xs text-gray-500">Range: <span id="gamma${i+1}_range"></span></span>
                             </div>
                         </div>
+                        <!-- beta parameter -->
+                        <div>
+                            <div class="text-xs text-gray-600 mb-1">β<sub>${i+1}</sub> (Mix parameter)</div>
+                            <input type="range" id="beta${i+1}_slider" class="w-full">
+                            <div class="flex items-center justify-between">
+                                <input type="number" id="beta${i+1}_input" class="param-input" step="0.01">
+                                <span class="text-xs text-gray-500">Range: <span id="beta${i+1}_range"></span></span>
+                            </div>
+                        </div>
                         <!-- f0 display -->
                         <div class="flex items-center justify-between bg-gray-50 p-2 rounded">
                             <span class="text-xs text-gray-600">f<sub>0,${i+1}</sub> (Resonance):</span>
@@ -1424,7 +1568,7 @@ Convergence Details: {get_user_friendly_message(result.message)}
                 parametersDisplay.appendChild(termDiv);
 
                 // Add controls for this term
-                const termParams = ['A', 'tau', 'alpha', 'gamma'];
+                const termParams = ['A', 'tau', 'alpha', 'gamma', 'beta'];
                 termParams.forEach(param => {
                     const key = `${param}${i+1}`;
                     paramControls[key] = {
@@ -1494,6 +1638,15 @@ Convergence Details: {get_user_friendly_message(result.message)}
                     step: 0.01
                 };
                 setControlValues(`gamma${i+1}`, gamma_val, gamma_range);
+
+                // beta parameter
+                const beta_val = params[`beta${i+1}`];
+                const beta_range = {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01
+                };
+                setControlValues(`beta${i+1}`, beta_val, beta_range);
 
                 // Update f0 display
                 updateF0Display(i, tau_val);
@@ -1566,8 +1719,8 @@ Convergence Details: {get_user_friendly_message(result.message)}
 
             // Term parameter listeners
             for (let i = 0; i < n_terms; i++) {
-                // Regular parameters (A, alpha, gamma)
-                ['A', 'alpha', 'gamma'].forEach(param => {
+                // Regular parameters (A, alpha, gamma, beta)
+                ['A', 'alpha', 'gamma', 'beta'].forEach(param => {
                     const key = `${param}${i+1}`;
                     const control = paramControls[key];
                     if (control) {
@@ -1626,6 +1779,7 @@ Convergence Details: {get_user_friendly_message(result.message)}
                 params[`tau${i+1}`] = parseFloat(paramControls[`tau${i+1}`].input.value);
                 params[`alpha${i+1}`] = parseFloat(paramControls[`alpha${i+1}`].input.value);
                 params[`gamma${i+1}`] = parseFloat(paramControls[`gamma${i+1}`].input.value);
+                params[`beta${i+1}`] = parseFloat(paramControls[`beta${i+1}`].input.value);
             }
 
             try {
@@ -1651,12 +1805,12 @@ Convergence Details: {get_user_friendly_message(result.message)}
 
                 // Update Report
                 const real_residuals = fittedDk.map((dk, i) => dk - currentData.measured_dk[i]);
-                const imag_residuals = fittedDf.map((df, i) => df - currentData.measured_df[i]);
+                const df_residuals = fittedDf.map((df, i) => df - currentData.measured_df[i]);
 
-                const n_dat = real_residuals.length * 2;
-                const n_var = 1 + 4 * n_terms;
+                const n_dat = real_residuals.length + df_residuals.length;
+                const n_var = 1 + 5 * n_terms;
                 const chi_sqr = real_residuals.reduce((sum, r) => sum + r*r, 0) +
-                               imag_residuals.reduce((sum, r) => sum + r*r, 0);
+                               df_residuals.reduce((sum, r) => sum + (2.0 * r)*(2.0 * r), 0);  // Apply same weighting
                 const red_chi_sqr = chi_sqr / (n_dat - n_var);
 
                 // Update report text
@@ -1667,6 +1821,7 @@ Convergence Details: {get_user_friendly_message(result.message)}
                     paramsText += `    tau${i+1}   = ${params[`tau${i+1}`].toExponential(4)} s\n`;
                     paramsText += `    alpha${i+1} = ${params[`alpha${i+1}`].toFixed(4)}\n`;
                     paramsText += `    gamma${i+1} = ${params[`gamma${i+1}`].toFixed(4)}\n`;
+                    paramsText += `    beta${i+1}  = ${params[`beta${i+1}`].toFixed(4)}\n`;
                     paramsText += `    f_0${i+1}   = ${(1/(2*Math.PI*params[`tau${i+1}`])/1e9).toFixed(4)} GHz\n`;
                 }
 
@@ -1765,6 +1920,7 @@ Convergence Details: {get_user_friendly_message(result.message)}
                     params[`tau${i+1}`] = parseFloat(paramControls[`tau${i+1}`].input.value);
                     params[`alpha${i+1}`] = parseFloat(paramControls[`alpha${i+1}`].input.value);
                     params[`gamma${i+1}`] = parseFloat(paramControls[`gamma${i+1}`].input.value);
+                    params[`beta${i+1}`] = parseFloat(paramControls[`beta${i+1}`].input.value);
                 }
 
                 // 1. Create Fitted Data CSV
