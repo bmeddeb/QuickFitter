@@ -13,6 +13,15 @@
         body {
             font-family: 'Inter', sans-serif;
         }
+        @media (max-width: 1024px) {
+          #split-root {
+            flex-direction: column;
+          }
+          #dragbar { display:none; }
+          #pane-left { width: 100% !important; border-right: none; border-bottom: 1px solid rgb(229 231 235); }
+        }
+        #kpi-wrapper { transition: box-shadow .15s; }
+        #kpi-wrapper:hover { box-shadow: 0 4px 12px rgb(0 0 0 / .15); }
         .spinner {
             border-top-color: #3498db;
             animation: spin 1s linear infinite;
@@ -124,112 +133,128 @@
                 </div>
             </div>
 
-            <div id="output" class="hidden mt-8">
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    <!-- Plot Display -->
-                    <div id="plot-container" class="lg:col-span-2 border border-gray-200 rounded-lg bg-gray-50 p-2">
-                         <div id="plot-output"></div>
+            <div id="output" class="hidden mt-8 h-[calc(100vh-14rem)]">
+
+              <!-- Split container -->
+              <div id="split-root" class="flex h-full w-full overflow-hidden">
+
+                <!-- LEFT PANE – plots -->
+                <div id="pane-left"
+                     class="relative w-[66%] min-w-[360px] flex-shrink-0 overflow-auto border-r">
+                  <div id="plot-output" class="h-full"></div>
+
+                  <!-- KPI overlay -->
+                  <div id="kpi-wrapper"
+                       class="fixed top-20 right-8 w-72 space-y-3 z-40 cursor-move select-none">
+                    <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
+                      <div class="flex items-center justify-between">
+                        <span class="text-sm font-medium">Fit Quality:</span>
+                        <span id="fit-quality-score" class="text-lg font-bold"></span>
+                      </div>
+                      <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                        <div id="fit-quality-bar" class="h-2 rounded-full transition-all duration-300"></div>
+                      </div>
                     </div>
-
-                    <!-- Parameters Display -->
-                    <div id="params-panel" class="lg:col-span-1 bg-white p-6 rounded-lg border">
-                        <div class="flex justify-between items-center mb-4">
-                            <h3 class="text-xl font-bold text-gray-800">Adjust Parameters</h3>
-                            <div class="flex space-x-2">
-                                <button id="reset-button" class="text-sm bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-1 px-3 rounded-lg">
-                                    Reset
-                                </button>
-                                <button id="download-button" class="text-sm bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1 px-3 rounded-lg">
-                                    Download
-                                </button>
-                            </div>
-                        </div>
-
-                        <!-- Fit Quality Indicator -->
-                        <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
-                            <div class="flex items-center justify-between">
-                                <span class="text-sm font-medium">Fit Quality:</span>
-                                <span id="fit-quality-score" class="text-lg font-bold"></span>
-                            </div>
-                            <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
-                                <div id="fit-quality-bar" class="h-2 rounded-full transition-all duration-300"></div>
-                            </div>
-                        </div>
-
-                        <!-- Metric Breakdown Chart -->
-                        <div id="radar-chart-container" class="mb-4 p-4 border border-gray-200 rounded-lg bg-gray-50 hidden">
-                            <h4 class="text-sm font-semibold text-gray-700 mb-3">Metric Breakdown</h4>
-                            <div id="radar-chart" class="w-full overflow-hidden" style="height: 280px; max-width: 100%;"></div>
-                        </div>
-
-                        <!-- Scoring Preferences Panel -->
-                        <div id="scoring-prefs" class="mb-4 p-4 border border-gray-200 rounded-lg bg-gray-50 hidden">
-                            <div class="flex items-center justify-between mb-3">
-                                <h4 class="text-sm font-semibold text-gray-700">Scoring Priorities</h4>
-                                <button id="toggle-scoring-prefs" class="text-xs text-blue-600 hover:text-blue-800">
-                                    <span class="toggle-text">Show</span>
-                                </button>
-                            </div>
-                            <div id="scoring-sliders" class="space-y-3 hidden">
-                                <div class="slider-group">
-                                    <label class="flex items-center justify-between text-xs text-gray-600">
-                                        <span>Uniform Fit Across Bands</span>
-                                        <span id="weight-regional_fit-value" class="font-mono">4.0</span>
-                                    </label>
-                                    <input type="range" id="weight-regional_fit" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                                           min="0" max="5" step="0.5" value="4" />
-                                </div>
-                                <div class="slider-group">
-                                    <label class="flex items-center justify-between text-xs text-gray-600">
-                                        <span>Low RMS in Dk</span>
-                                        <span id="weight-rms_real-value" class="font-mono">3.0</span>
-                                    </label>
-                                    <input type="range" id="weight-rms_real" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                                           min="0" max="5" step="0.5" value="3" />
-                                </div>
-                                <div class="slider-group">
-                                    <label class="flex items-center justify-between text-xs text-gray-600">
-                                        <span>Low RMS in Df</span>
-                                        <span id="weight-rms_imag-value" class="font-mono">3.0</span>
-                                    </label>
-                                    <input type="range" id="weight-rms_imag" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                                           min="0" max="5" step="0.5" value="3" />
-                                </div>
-                                <div class="slider-group">
-                                    <label class="flex items-center justify-between text-xs text-gray-600">
-                                        <span>Chi-Square Fit</span>
-                                        <span id="weight-reduced_chi_square-value" class="font-mono">2.0</span>
-                                    </label>
-                                    <input type="range" id="weight-reduced_chi_square" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                                           min="0" max="5" step="0.5" value="2" />
-                                </div>
-                                <div class="slider-group">
-                                    <label class="flex items-center justify-between text-xs text-gray-600">
-                                        <span>Model Simplicity (BIC)</span>
-                                        <span id="weight-bic-value" class="font-mono">2.0</span>
-                                    </label>
-                                    <input type="range" id="weight-bic" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                                           min="0" max="5" step="0.5" value="2" />
-                                </div>
-                                <button id="apply-scoring-prefs" class="mt-3 w-full px-3 py-2 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors">
-                                    Apply Changes
-                                </button>
-                            </div>
-                        </div>
-
-                        <div id="parameters-display" class="space-y-4 text-sm overflow-y-auto" style="max-height: 600px;">
-                            <!-- Parameters will be dynamically inserted here -->
-                        </div>
+                    <div id="radar-chart-container" class="mb-4 border border-gray-200 rounded-lg bg-gray-50 hidden">
+                      <div class="flex items-center justify-between p-3 border-b border-gray-200 cursor-pointer" id="radar-toggle">
+                        <h4 class="text-sm font-semibold text-gray-700">Metric Breakdown</h4>
+                        <svg id="radar-chevron" class="w-4 h-4 transform transition-transform text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                      </div>
+                      <div id="radar-content" class="p-4">
+                        <div id="radar-chart" class="w-full overflow-hidden" style="height: 320px; max-width: 100%;"></div>
+                      </div>
                     </div>
+                  </div>
                 </div>
 
-                <!-- Report Display -->
-                <div class="mt-8">
-                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Fit Report</h2>
-                    <div class="bg-gray-900 text-white font-mono text-sm p-6 rounded-lg overflow-x-auto">
-                        <pre id="report-output"></pre>
+                <!-- DRAG BAR -->
+                <div id="dragbar"
+                     class="w-1 bg-gray-300 cursor-col-resize hover:bg-gray-400"></div>
+
+                <!-- RIGHT PANE – parameters & scoring -->
+                <div id="pane-right" class="flex-1 overflow-auto p-6 space-y-6">
+
+                  <!-- Buttons -->
+                  <div class="flex justify-end space-x-2">
+                    <button id="reset-button"
+                            class="bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded text-sm">
+                      Reset
+                    </button>
+                    <button id="download-button"
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">
+                      Download
+                    </button>
+                  </div>
+
+                  <!-- Parameter sliders injected here -->
+                  <h3 class="text-xl font-bold">Adjust Parameters</h3>
+                  <div id="parameters-display" class="space-y-6"></div>
+
+                  <!-- Collapsible scoring -->
+                  <details id="scoring-prefs" class="hidden">
+                    <summary class="font-semibold cursor-pointer">
+                      Scoring priorities
+                    </summary>
+                    <div id="scoring-sliders" class="mt-4 space-y-4">
+                      <div class="slider-group">
+                        <label class="flex items-center justify-between text-xs text-gray-600">
+                          <span>Uniform Fit Across Bands</span>
+                          <span id="weight-regional_fit-value" class="font-mono">4.0</span>
+                        </label>
+                        <input type="range" id="weight-regional_fit" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                               min="0" max="5" step="0.5" value="4" />
+                      </div>
+                      <div class="slider-group">
+                        <label class="flex items-center justify-between text-xs text-gray-600">
+                          <span>Low RMS in Dk</span>
+                          <span id="weight-rms_real-value" class="font-mono">3.0</span>
+                        </label>
+                        <input type="range" id="weight-rms_real" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                               min="0" max="5" step="0.5" value="3" />
+                      </div>
+                      <div class="slider-group">
+                        <label class="flex items-center justify-between text-xs text-gray-600">
+                          <span>Low RMS in Df</span>
+                          <span id="weight-rms_imag-value" class="font-mono">3.0</span>
+                        </label>
+                        <input type="range" id="weight-rms_imag" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                               min="0" max="5" step="0.5" value="3" />
+                      </div>
+                      <div class="slider-group">
+                        <label class="flex items-center justify-between text-xs text-gray-600">
+                          <span>Chi-Square Fit</span>
+                          <span id="weight-reduced_chi_square-value" class="font-mono">2.0</span>
+                        </label>
+                        <input type="range" id="weight-reduced_chi_square" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                               min="0" max="5" step="0.5" value="2" />
+                      </div>
+                      <div class="slider-group">
+                        <label class="flex items-center justify-between text-xs text-gray-600">
+                          <span>Model Simplicity (BIC)</span>
+                          <span id="weight-bic-value" class="font-mono">2.0</span>
+                        </label>
+                        <input type="range" id="weight-bic" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                               min="0" max="5" step="0.5" value="2" />
+                      </div>
                     </div>
+                    <button id="apply-scoring-prefs"
+                            class="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white py-2 text-sm rounded">
+                      Apply changes
+                    </button>
+                  </details>
+
                 </div>
+              </div>
+
+              <!-- Report Display -->
+              <div class="mt-8">
+                <h2 class="text-2xl font-bold mb-4 text-gray-800">Fit Report</h2>
+                <div class="bg-gray-900 text-white font-mono text-sm p-6 rounded-lg overflow-x-auto">
+                  <pre id="report-output"></pre>
+                </div>
+              </div>
             </div>
              <!-- Error Display -->
             <div id="error-box" class="hidden mt-6 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
@@ -2224,11 +2249,9 @@ Convergence Details: {get_user_friendly_message(result.message)}
             const indicator = document.getElementById('fit-quality-indicator');
             const scoreSpan = document.getElementById('fit-quality-score');
             const bar = document.getElementById('fit-quality-bar');
-            const radarContainer = document.getElementById('radar-chart-container');
 
             if (!evaluation) {
                 indicator.classList.add('hidden');
-                radarContainer.classList.add('hidden');
                 return;
             }
 
@@ -2506,22 +2529,8 @@ Convergence Details: {get_user_friendly_message(result.message)}
 
         // Initialize scoring preferences UI
         function initializeScoringPreferences() {
-            const toggleButton = document.getElementById('toggle-scoring-prefs');
-            const scoringSliders = document.getElementById('scoring-sliders');
             const applyButton = document.getElementById('apply-scoring-prefs');
             const scoringPrefs = document.getElementById('scoring-prefs');
-
-            // Show/hide toggle functionality
-            toggleButton.addEventListener('click', () => {
-                const isHidden = scoringSliders.classList.contains('hidden');
-                if (isHidden) {
-                    scoringSliders.classList.remove('hidden');
-                    toggleButton.querySelector('.toggle-text').textContent = 'Hide';
-                } else {
-                    scoringSliders.classList.add('hidden');
-                    toggleButton.querySelector('.toggle-text').textContent = 'Show';
-                }
-            });
 
             // Update slider value displays
             const sliders = ['weight-regional_fit', 'weight-rms_real', 'weight-rms_imag', 'weight-reduced_chi_square', 'weight-bic'];
@@ -2612,6 +2621,140 @@ Convergence Details: {get_user_friendly_message(result.message)}
         main();
         updateButtonState();
         initializeScoringPreferences();
+
+        // --- Split-pane resizing (Plot pane ↔ Parameter pane) ---
+        (function () {
+          const dragbar     = document.getElementById('dragbar');
+          const paneLeft    = document.getElementById('pane-left');
+          const plotDiv     = document.getElementById('plot-output');
+
+          let startX, startWidth;
+
+          // mouse down ─► start dragging
+          dragbar.addEventListener('mousedown', e => {
+            startX      = e.clientX;
+            startWidth  = paneLeft.getBoundingClientRect().width;
+            document.body.classList.add('select-none');      // avoid text selection
+            window.addEventListener('mousemove', onDrag);
+            window.addEventListener('mouseup',   stopDrag);
+          });
+
+          function onDrag (e) {
+            const newWidth = Math.max(360, startWidth + (e.clientX - startX));  // 360 = min-width
+            paneLeft.style.width = newWidth + 'px';
+            // Let Plotly redraw smoothly but throttle to every animation frame
+            window.requestAnimationFrame(() => Plotly.Plots.resize(plotDiv));
+          }
+
+          function stopDrag () {
+            window.removeEventListener('mousemove', onDrag);
+            window.removeEventListener('mouseup',   stopDrag);
+            document.body.classList.remove('select-none');
+            // Final resize (especially if user releases quickly)
+            Plotly.Plots.resize(plotDiv);
+          }
+
+          // Ensure plot resizes on window resize
+          window.addEventListener('resize', () => Plotly.Plots.resize(plotDiv));
+        })();
+
+        // ── draggable KPI wrapper ─────────────────────────────────────────────
+        (function () {
+          const wrapper   = document.getElementById('kpi-wrapper');
+          if (!wrapper) return;
+
+          let startX, startY, startLeft, startTop, dragging = false;
+
+          const getPos = e => ({
+            x: e.touches ? e.touches[0].clientX : e.clientX,
+            y: e.touches ? e.touches[0].clientY : e.clientY
+          });
+
+          const startDrag = e => {
+            // Allow Plotly interactions inside the radar chart and toggle clicks – drag only if user
+            // begins on the wrapper itself (not on an inner canvas/element)
+            if (e.target.closest('#radar-chart') || e.target.closest('#radar-toggle')) return;
+
+            const p   = getPos(e);
+            const box = wrapper.getBoundingClientRect();
+            startX = p.x;  startY = p.y;
+            startLeft = box.left;  startTop = box.top;
+
+            // Switch to explicit left/top so we can move freely
+            wrapper.style.left  = startLeft + 'px';
+            wrapper.style.top   = startTop  + 'px';
+            wrapper.style.right = 'auto';
+
+            dragging = true;
+            wrapper.classList.add('opacity-90');
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup',   stopDrag);
+            document.addEventListener('touchmove', onDrag,  { passive:false });
+            document.addEventListener('touchend',  stopDrag);
+          };
+
+          const onDrag = e => {
+            if (!dragging) return;
+            e.preventDefault();                    // avoid scrolling on touch
+            const p = getPos(e);
+            const dx = p.x - startX;
+            const dy = p.y - startY;
+            wrapper.style.left = startLeft + dx + 'px';
+            wrapper.style.top  = startTop  + dy + 'px';
+
+            // keep the card inside the viewport (optional)
+            const rect = wrapper.getBoundingClientRect();
+            const vw = window.innerWidth, vh = window.innerHeight;
+            if (rect.left < 0) wrapper.style.left = '0px';
+            if (rect.top  < 0) wrapper.style.top  = '0px';
+            if (rect.right > vw) wrapper.style.left = vw - rect.width + 'px';
+            if (rect.bottom > vh) wrapper.style.top = vh - rect.height + 'px';
+          };
+
+          const stopDrag = () => {
+            dragging = false;
+            wrapper.classList.remove('opacity-90');
+            document.removeEventListener('mousemove', onDrag);
+            document.removeEventListener('mouseup',   stopDrag);
+            document.removeEventListener('touchmove', onDrag);
+            document.removeEventListener('touchend',  stopDrag);
+            // Ensure the radar chart reflows if width changed
+            Plotly.Plots.resize(document.getElementById('radar-chart'));
+          };
+
+          wrapper.addEventListener('mousedown', startDrag);
+          wrapper.addEventListener('touchstart', startDrag, { passive:false });
+        })();
+
+        // ── collapsible radar chart ─────────────────────────────────────────────
+        (function () {
+          const toggle = document.getElementById('radar-toggle');
+          const content = document.getElementById('radar-content');
+          const chevron = document.getElementById('radar-chevron');
+          
+          if (!toggle || !content || !chevron) return;
+          
+          let isCollapsed = false;
+          
+          toggle.addEventListener('click', (e) => {
+            // Don't trigger drag when clicking toggle
+            e.stopPropagation();
+            
+            isCollapsed = !isCollapsed;
+            
+            if (isCollapsed) {
+              content.style.display = 'none';
+              chevron.style.transform = 'rotate(-90deg)';
+            } else {
+              content.style.display = 'block';
+              chevron.style.transform = 'rotate(0deg)';
+              // Resize Plotly chart when expanded
+              setTimeout(() => {
+                Plotly.Plots.resize(document.getElementById('radar-chart'));
+              }, 100);
+            }
+          });
+        })();
     </script>
 </body>
 </html>
