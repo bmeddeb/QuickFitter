@@ -130,8 +130,14 @@
             <div id="output" class="hidden mt-8">
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                     <!-- Plot Display -->
-                    <div id="plot-container" class="lg:col-span-2 border border-gray-200 rounded-lg bg-gray-50 p-2">
-                         <div id="plot-output"></div>
+                    <div id="plot-container" class="lg:col-span-2 space-y-4">
+                        <div class="border border-gray-200 rounded-lg bg-gray-50 p-2">
+                            <div id="plot-output"></div>
+                        </div>
+                        <!-- BIC Chart -->
+                        <div class="border border-gray-200 rounded-lg bg-gray-50 p-2 hidden" id="bic-chart-container">
+                            <div id="bic-chart" style="height: 300px;"></div>
+                        </div>
                     </div>
 
                     <!-- Parameter Controls -->
@@ -2184,6 +2190,39 @@ result_json
 
                     reportOutput.textContent = result.report;
                     setupParameterControls(result.fitted_params);
+
+                    // Show BIC chart if available
+                    if (result.bic_values && Object.keys(result.bic_values).length > 1) {
+                        const labels = Object.keys(result.bic_values).map(k => k + ' poles');
+                        const bicVals = Object.values(result.bic_values);
+                        const minBic = Math.min(...bicVals);
+                        const deltaBic = bicVals.map(b => b - minBic); // ΔBIC relative to best
+
+                        Plotly.newPlot('bic-chart',
+                            [{
+                                x: labels,
+                                y: deltaBic,
+                                type: 'bar',
+                                marker: {
+                                    color: deltaBic.map(d => d === 0 ? '#3b82f6' : '#94a3b8'),
+                                    opacity: 0.7
+                                },
+                                text: deltaBic.map(d => d.toFixed(1)),
+                                textposition: 'auto'
+                            }],
+                            {
+                                title: 'ΔBIC vs. Pole Count',
+                                yaxis: {title: 'ΔBIC (relative to best)'},
+                                xaxis: {title: 'Model Complexity'},
+                                margin: {l: 50, r: 20, t: 40, b: 40},
+                                font: {size: 12}
+                            },
+                            {responsive: true}
+                        );
+                        document.getElementById('bic-chart-container').classList.remove('hidden');
+                    } else {
+                        document.getElementById('bic-chart-container').classList.add('hidden');
+                    }
 
                                                             // Show detection method if auto-detected
                     if (result.detection_method && result.detection_method !== 'manual') {
