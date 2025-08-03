@@ -1074,8 +1074,20 @@ def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-1
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
         if param_name in params_dict:
-            # Use relative step
-            step = rel_step * abs(params_dict[param_name]) + abs_step
+            param_value = params_dict[param_name]
+            
+            # Choose appropriate step size based on parameter type
+            if param_name.startswith('log_tau'):
+                # For log-tau parameters, use absolute step in log-space
+                step = 1e-5  # Small step in log10 space (~0.002% change in tau)
+            elif param_name.startswith('tau_'):
+                # For regular tau parameters (backward compatibility)
+                # Use larger absolute step to avoid machine precision issues
+                step = max(rel_step * abs(param_value), 1e-10)
+            else:
+                # For other parameters (eps_inf, delta_eps)
+                step = max(rel_step * abs(param_value), abs_step)
+            
             params_plus = params_dict.copy()
             params_plus[param_name] += step
 
@@ -1123,14 +1135,18 @@ def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data, n_pol
     except:
         return None
 
-def format_correlation_matrix(corr_matrix, n_poles):
+def format_correlation_matrix(corr_matrix, n_poles, use_log_tau=False):
     """Format correlation matrix for display."""
     if corr_matrix is None:
         return "Unable to calculate correlation matrix"
 
     param_names = ['eps_inf']
     for i in range(n_poles):
-        param_names.extend([f'delta_eps_{i}', f'tau_{i}'])
+        param_names.append(f'delta_eps_{i}')
+        if use_log_tau:
+            param_names.append(f'log_tau_{i}')
+        else:
+            param_names.append(f'tau_{i}')
 
     result = "Correlations:\\n"
 
@@ -1141,7 +1157,10 @@ def format_correlation_matrix(corr_matrix, n_poles):
                     if i < len(corr_matrix) and j < len(corr_matrix[0]):
                         correlation = corr_matrix[i, j]
                         if abs(correlation) > 0.1:  # Only show significant correlations
-                            result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
+                            # Display log_tau as tau for clarity
+                            display_param1 = param1.replace('log_tau_', 'tau_')
+                            display_param2 = param2.replace('log_tau_', 'tau_')
+                            result += f"    ({display_param1}, {display_param2}) = {correlation:+.4f}\\n"
     except (IndexError, TypeError) as e:
         result += f"    Error accessing correlation matrix: {e}\\n"
 
@@ -1497,20 +1516,39 @@ def run_analysis(csv_content, n_poles_input, method):
     # Extract correlation matrix from fit result
     correlations_str = ""
     if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
-        global_correlation_matrix = result.covar
+        # Filter out ratio parameters and get indices of kept parameters
+        kept_params = []
+        kept_indices = []
+        for i, name in enumerate(result.var_names):
+            if not ('log_tau_ratio' in name):
+                kept_params.append(name)
+                kept_indices.append(i)
+        
+        # Extract the submatrix for kept parameters only
+        n_kept = len(kept_indices)
+        filtered_covar = np.zeros((n_kept, n_kept))
+        for i, idx_i in enumerate(kept_indices):
+            for j, idx_j in enumerate(kept_indices):
+                filtered_covar[i, j] = result.covar[idx_i, idx_j]
+        
+        global_correlation_matrix = filtered_covar
+        
+        # Calculate correlations from filtered covariance matrix
         correlations_str = "\\nCorrelations (from optimization):\\n"
-        for i, name1 in enumerate(result.var_names):
-            for j, name2 in enumerate(result.var_names):
-                if j > i and not ('log_tau_ratio' in name1 or 'log_tau_ratio' in name2):
-                    try:
-                        corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
+        for i in range(n_kept):
+            for j in range(i + 1, n_kept):
+                try:
+                    std_i = np.sqrt(filtered_covar[i, i])
+                    std_j = np.sqrt(filtered_covar[j, j])
+                    if std_i > 0 and std_j > 0:
+                        corr_val = filtered_covar[i, j] / (std_i * std_j)
                         if abs(corr_val) > 0.1:
                             # Display log_tau as tau for clarity
-                            display_name1 = name1.replace('log_tau_', 'tau_')
-                            display_name2 = name2.replace('log_tau_', 'tau_')
+                            display_name1 = kept_params[i].replace('log_tau_', 'tau_')
+                            display_name2 = kept_params[j].replace('log_tau_', 'tau_')
                             correlations_str += f"    ({display_name1}, {display_name2}) = {corr_val:+.4f}\\n"
-                    except:
-                        pass
+                except Exception as e:
+                    logger.warning(f"Error calculating correlation: {e}")
 
     # Generate standard LMFit table
     report_content = fit_report(result).replace('[[', '').replace(']]', '')
