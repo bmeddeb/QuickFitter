@@ -609,7 +609,7 @@ def select_poles_bic(f_ghz, complex_epsilon, max_poles=4):
     for n in range(1, max_poles + 1):
         try:
             # Get initial parameters for n poles
-            initial_params = estimate_initial_parameters(f_ghz, complex_epsilon, n)
+            initial_params = estimate_initial_parameters(f_ghz, complex_epsilon, n, random_seed=42)
             
             # Perform quick fit
             fit_result = quick_single_fit(f_ghz, complex_epsilon, initial_params, n)
@@ -736,44 +736,177 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
     
     return n_poles, detection_method
 
-def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None):
-    """Estimate initial parameters for Multi-Pole Debye model."""
+def estimate_tau_cole_cole(f_ghz, complex_epsilon, eps_inf=None, eps_s=None):
+    """Estimate relaxation time using Cole-Cole transformation."""
+    dk = np.real(complex_epsilon)
+    
+    # Estimate eps_inf and eps_s if not provided
+    if eps_inf is None:
+        # Use high-frequency limit (last 10% of data)
+        high_freq_idx = int(0.9 * len(dk))
+        eps_inf = np.mean(dk[high_freq_idx:]) if high_freq_idx < len(dk) else dk[-1]
+    
+    if eps_s is None:
+        # Use low-frequency limit (first 10% of data)
+        low_freq_idx = int(0.1 * len(dk))
+        eps_s = np.mean(dk[:low_freq_idx]) if low_freq_idx > 0 else dk[0]
+    
+    # Avoid division by zero
+    if abs(eps_s - eps_inf) < 1e-6:
+        return None
+    
+    # Cole-Cole transformation
+    # For Debye model: (ε - ε∞)/(εs - ε∞) = 1/(1 + jωτ)
+    # Phase angle φ = arctan(ωτ), so φ = π/4 when ωτ = 1
+    try:
+        # Calculate normalized complex permittivity
+        eps_norm = (complex_epsilon - eps_inf) / (eps_s - eps_inf)
+        
+        # Calculate phase angle
+        phi = np.angle(eps_norm)
+        
+        # Find frequency where phase is closest to -π/4 (for Debye relaxation)
+        target_phase = -np.pi / 4
+        idx_min = np.argmin(np.abs(phi - target_phase))
+        
+        # Estimate tau from this frequency
+        f_relax = f_ghz[idx_min]
+        tau_est = 1 / (2 * np.pi * f_relax * 1e9)
+        
+        return tau_est
+    except Exception as e:
+        logger.warning(f"Cole-Cole tau estimation failed: {e}")
+        return None
+
+def find_loss_peaks_advanced(f_ghz, complex_epsilon, n_expected=None):
+    """Find loss peaks with improved peak detection for overlapping relaxations."""
+    eps_imag = -np.imag(complex_epsilon)
+    
+    if len(eps_imag) < 3:
+        return []
+    
+    # Apply mild smoothing to reduce noise
+    window = min(5, len(eps_imag) // 5)
+    if window >= 3:
+        eps_smooth = np.convolve(eps_imag, np.ones(window)/window, mode='same')
+    else:
+        eps_smooth = eps_imag
+    
+    # Find all local maxima
+    peaks = []
+    for i in range(1, len(eps_smooth) - 1):
+        if eps_smooth[i] > eps_smooth[i-1] and eps_smooth[i] > eps_smooth[i+1]:
+            peaks.append(i)
+    
+    if not peaks:
+        # If no peaks found, use maximum
+        peaks = [np.argmax(eps_smooth)]
+    
+    # Sort peaks by prominence
+    peak_values = [eps_smooth[p] for p in peaks]
+    sorted_indices = np.argsort(peak_values)[::-1]
+    peaks = [peaks[i] for i in sorted_indices]
+    
+    # If we expect a certain number of peaks, try to find them
+    if n_expected and len(peaks) < n_expected:
+        # Look for shoulders or inflection points
+        d2_eps = np.gradient(np.gradient(eps_smooth))
+        for i in range(1, len(d2_eps) - 1):
+            if d2_eps[i-1] > 0 and d2_eps[i+1] < 0:  # Inflection point
+                if i not in peaks:
+                    peaks.append(i)
+    
+    # Convert to frequencies
+    peak_frequencies = [f_ghz[p] for p in peaks[:n_expected] if p < len(f_ghz)]
+    
+    return peak_frequencies
+
+def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_seed=None):
+    """Estimate initial parameters for Multi-Pole Debye model with improved tau estimation."""
     dk = np.real(complex_epsilon)
     df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
+    
+    # Set random seed for reproducibility
+    if random_seed is not None:
+        np.random.seed(random_seed)
 
     # Auto-detect poles if not specified
     if n_poles is None or n_poles == 'auto':
         n_poles, _ = detect_number_of_poles(f_ghz, complex_epsilon)
 
-    # Basic parameters
-    eps_inf = dk[-1] if len(dk) > 0 else 1.0
-    eps_s = dk[0] if len(dk) > 0 else 2.0
+    # Estimate eps_inf and eps_s more robustly
+    # Use percentiles to be less sensitive to outliers
+    high_freq_idx = int(0.8 * len(dk))
+    low_freq_idx = int(0.2 * len(dk))
+    
+    eps_inf = np.median(dk[high_freq_idx:]) if high_freq_idx < len(dk) else dk[-1]
+    eps_s = np.median(dk[:low_freq_idx]) if low_freq_idx > 0 else dk[0]
+    
+    # Ensure physical constraints
+    eps_inf = max(1.0, eps_inf)
+    eps_s = max(eps_inf + 0.1, eps_s)  # eps_s should be > eps_inf
+    
     total_delta_eps = eps_s - eps_inf
 
     # Initialize parameters dictionary
     params = {'eps_inf': eps_inf, 'n_poles': n_poles}
 
     if n_poles == 1:
-        # Single pole case
+        # Single pole case - use Cole-Cole transformation
+        tau_cc = estimate_tau_cole_cole(f_ghz, complex_epsilon, eps_inf, eps_s)
+        
+        if tau_cc is not None:
+            params['tau_0'] = tau_cc
+        else:
+            # Fallback to maximum loss method
+            max_loss_idx = np.argmax(-np.imag(complex_epsilon))
+            f_max = f_ghz[max_loss_idx]
+            params['tau_0'] = 1 / (2 * np.pi * f_max * 1e9)
+        
         params['delta_eps_0'] = total_delta_eps
-        # Find frequency of maximum loss
-        max_loss_idx = np.argmax(-np.imag(complex_epsilon))
-        f_max = f_ghz[max_loss_idx]
-        params['tau_0'] = 1 / (2 * np.pi * f_max * 1e9)
+        
     else:
-        # Multiple poles - distribute evenly in log space
-        f_min = f_ghz[0] if len(f_ghz) > 0 else 0.1
-        f_max = f_ghz[-1] if len(f_ghz) > 0 else 100.0
-
-        # Logarithmically spaced relaxation times
-        log_f_min = np.log10(f_min)
-        log_f_max = np.log10(f_max)
-        log_f_poles = np.linspace(log_f_min, log_f_max, n_poles)
-        f_poles = 10**log_f_poles
-
-        for i in range(n_poles):
-            params[f'delta_eps_{i}'] = total_delta_eps / n_poles
-            params[f'tau_{i}'] = 1 / (2 * np.pi * f_poles[i] * 1e9)
+        # Multiple poles case
+        # Try to find actual peak frequencies
+        peak_freqs = find_loss_peaks_advanced(f_ghz, complex_epsilon, n_poles)
+        
+        if len(peak_freqs) >= n_poles:
+            # Use detected peaks for tau values
+            for i in range(n_poles):
+                params[f'tau_{i}'] = 1 / (2 * np.pi * peak_freqs[i] * 1e9)
+                params[f'delta_eps_{i}'] = total_delta_eps / n_poles
+        else:
+            # Fallback to logarithmic spacing, but biased toward detected peaks
+            f_min = f_ghz[0] if len(f_ghz) > 0 else 0.1
+            f_max = f_ghz[-1] if len(f_ghz) > 0 else 100.0
+            
+            if peak_freqs:
+                # Use detected peaks as anchors
+                f_min = min(f_min, min(peak_freqs) * 0.3)
+                f_max = max(f_max, max(peak_freqs) * 3.0)
+            
+            # Create tau values with some randomization to avoid local minima
+            log_f_min = np.log10(f_min)
+            log_f_max = np.log10(f_max)
+            
+            # Add small random perturbations to help optimizer
+            log_f_poles = np.linspace(log_f_min, log_f_max, n_poles)
+            log_f_poles += np.random.uniform(-0.1, 0.1, n_poles) * (log_f_max - log_f_min) / n_poles
+            f_poles = 10**log_f_poles
+            
+            # Assign parameters
+            for i in range(n_poles):
+                params[f'tau_{i}'] = 1 / (2 * np.pi * f_poles[i] * 1e9)
+                
+                # Vary delta_eps slightly to help optimizer
+                variation = 1.0 + np.random.uniform(-0.2, 0.2)
+                params[f'delta_eps_{i}'] = (total_delta_eps / n_poles) * variation
+        
+        # Ensure sum of delta_eps equals total
+        sum_delta = sum(params[f'delta_eps_{i}'] for i in range(n_poles))
+        if sum_delta > 0:
+            for i in range(n_poles):
+                params[f'delta_eps_{i}'] *= total_delta_eps / sum_delta
 
     return params
 
@@ -1185,7 +1318,7 @@ def run_analysis(csv_content, n_poles_input, method):
 
     global_n_poles = n_poles
 
-    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_poles)
+    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_poles, random_seed=42)
     params = Parameters()
 
     # Add epsilon infinity
