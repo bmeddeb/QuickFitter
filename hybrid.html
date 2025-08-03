@@ -553,19 +553,13 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
 
 def calculate_hybrid_model(params, f_ghz, n_terms):
     """Calculate Hybrid Debye-Lorentz model response"""
-    # Debug logging
-    print(f"calculate_hybrid_model: params type = {type(params)}")
-    print(f"calculate_hybrid_model: n_terms = {n_terms}")
-
     # Robust JsProxy to Python dict conversion
     if str(type(params)) == "<class 'pyodide.ffi.JsProxy'>":
-        print("calculate_hybrid_model: Converting JsProxy to Python dict...")
         # Convert JsProxy to Python dict
         try:
             # Method 1: Try to_py() if available
             if hasattr(params, 'to_py'):
                 params = params.to_py()
-                print("calculate_hybrid_model: Converted using to_py()")
             else:
                 # Method 2: Manual conversion using object_keys()
                 param_dict = {}
@@ -573,9 +567,7 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
                 for key in keys:
                     param_dict[key] = params[key]
                 params = param_dict
-                print("calculate_hybrid_model: Converted using object_keys()")
         except Exception as e:
-            print(f"calculate_hybrid_model: Conversion failed, using fallback: {e}")
             # Method 3: Fallback - extract values manually
             param_dict = {}
             # Try to get all expected parameter names
@@ -588,7 +580,6 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
                 param_dict[f'omega0{i+1}'] = float(params[f'omega0{i+1}']) if f'omega0{i+1}' in params else 1e10
                 param_dict[f'gamma{i+1}'] = float(params[f'gamma{i+1}']) if f'gamma{i+1}' in params else 1e8
             params = param_dict
-            print("calculate_hybrid_model: Used fallback conversion")
 
     # Ensure f_ghz is a numpy array
     f_ghz = np.asarray(f_ghz)
@@ -731,26 +722,18 @@ def create_downloadable_plot(fitted_params, n_terms):
     if global_f_ghz is None:
         return None
 
-    # Debug logging
-    print(f"create_downloadable_plot: fitted_params type = {type(fitted_params)}")
-    print(f"create_downloadable_plot: fitted_params = {fitted_params}")
-
     # Robust JsProxy to Python dict conversion
     if str(type(fitted_params)) == "<class 'pyodide.ffi.JsProxy'>":
-        print("Converting JsProxy to Python dict...")
         try:
             if hasattr(fitted_params, 'to_py'):
                 fitted_params = fitted_params.to_py()
-                print("Converted using to_py()")
             else:
                 param_dict = {}
                 keys = fitted_params.object_keys()
                 for key in keys:
                     param_dict[key] = fitted_params[key]
                 fitted_params = param_dict
-                print("Converted using object_keys()")
         except Exception as e:
-            print(f"Conversion failed, using fallback: {e}")
             # Fallback - extract values manually
             param_dict = {}
             param_dict['eps_inf'] = float(fitted_params['eps_inf']) if 'eps_inf' in fitted_params else 1.0
@@ -762,9 +745,6 @@ def create_downloadable_plot(fitted_params, n_terms):
                 param_dict[f'omega0{i+1}'] = float(fitted_params[f'omega0{i+1}']) if f'omega0{i+1}' in fitted_params else 1e10
                 param_dict[f'gamma{i+1}'] = float(fitted_params[f'gamma{i+1}']) if f'gamma{i+1}' in fitted_params else 1e8
             fitted_params = param_dict
-            print("Used fallback conversion")
-
-    print(f"Final fitted_params type = {type(fitted_params)}")
     fitted_epsilon = calculate_hybrid_model(fitted_params, global_f_ghz, n_terms)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
@@ -820,32 +800,28 @@ def run_analysis(csv_content, n_terms, method):
 
     fit_params = {p: float(v.value) for p, v in result.params.items()}
 
-    # Calculate residuals and statistics
+    # Use lmfit's correctly weighted statistical measures
+    n_dat = len(f_ghz) * 2  # real and imag parts
+    n_var = 1 + 6 * n_terms  # eps_inf + 6 params per term (delta_eps_D, tau_D, alpha, delta_eps_L, omega0, gamma)
+
+    # Get properly weighted chi-square from lmfit result
+    chi_sqr = result.chisqr if hasattr(result, 'chisqr') else 0.0
+    red_chi_sqr = result.redchi if hasattr(result, 'redchi') else 0.0
+
+    # Get AIC & BIC from lmfit result (properly calculated)
+    aic = result.aic if hasattr(result, 'aic') else (n_dat * np.log(chi_sqr / n_dat) + 2 * n_var if chi_sqr > 0 else 0)
+    bic = result.bic if hasattr(result, 'bic') else (n_dat * np.log(chi_sqr / n_dat) + n_var * np.log(n_dat) if chi_sqr > 0 else 0)
+
+    # Calculate residuals for report display (but don't use for statistics)
     fitted_epsilon = calculate_hybrid_model(result.params.valuesdict(), f_ghz, n_terms)
     real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
     imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon_data)
-
-    n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 1 + 6 * n_terms  # eps_inf + 6 params per term (delta_eps_D, tau_D, alpha, delta_eps_L, omega0, gamma)
-
-    # Use weighted residuals for χ² (consistent with residual() function)
-    sigma_r = np.std(np.real(complex_epsilon_data))
-    sigma_i = np.std(np.imag(complex_epsilon_data))
-    chi_sqr = np.sum((real_residuals/sigma_r)**2) + np.sum((imag_residuals/sigma_i)**2)
-    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-
-    # Calculate AIC & BIC with weighted RSS
-    rss = chi_sqr                     # already sum of squared *weighted* residuals
-    k   = n_var
-    n   = n_dat
-    aic = n*np.log(rss/n) + 2*k
-    bic = n*np.log(rss/n) + k*np.log(n)
 
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(result.params.valuesdict(), f_ghz, n_terms)
     corr_text = format_correlation_matrix(corr_matrix, n_terms)
 
-        # Create model description
+    # Create model description
     model_desc = f"""Hybrid Debye-Lorentz Model with {n_terms} term(s)
 --------------------------------------------------
  ε(ω) = ε_inf + Σ[i=1 to {n_terms}] H_i(ω)
@@ -1384,8 +1360,20 @@ Message: {result.message}
 
                 const n_dat = real_residuals.length * 2;
                 const n_var = 1 + 6 * n_terms;
-                const chi_sqr = real_residuals.reduce((sum, r) => sum + r*r, 0) +
-                               imag_residuals.reduce((sum, r) => sum + r*r, 0);
+
+                // Use weighted residuals for chi-square (consistent with Python residual() function)
+                const sigma_r = Math.sqrt(currentData.measured_dk.reduce((sum, val, i, arr) => {
+                    const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+                    return sum + (val - mean) ** 2;
+                }, 0) / currentData.measured_dk.length);
+
+                const sigma_i = Math.sqrt(currentData.measured_df.reduce((sum, val, i, arr) => {
+                    const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+                    return sum + (val - mean) ** 2;
+                }, 0) / currentData.measured_df.length);
+
+                const chi_sqr = real_residuals.reduce((sum, r) => sum + (r/sigma_r)**2, 0) +
+                               imag_residuals.reduce((sum, r) => sum + (r/sigma_i)**2, 0);
                 const red_chi_sqr = chi_sqr / (n_dat - n_var);
 
                 // Update report text
@@ -1418,10 +1406,10 @@ Message: {result.message}
                 reportOutput.textContent = statsUpdate;
 
                 // Update fit quality indicator
-                // Create a simple evaluation based on reduced chi-square centered around χ² ≈ 1
+                // Use same thresholds as FitEvaluator for consistency
                 const score = red_chi_sqr < 0.8 ? 100 :
                              red_chi_sqr < 1.2 ? 80 :
-                             red_chi_sqr < 2 ? 60 : 30;
+                             red_chi_sqr < 2.0 ? 60 : 30;
                 const category = score >= 90 ? "Godly" :
                                 score >= 75 ? "Excellent" :
                                 score >= 60 ? "Good" : "Poor";
