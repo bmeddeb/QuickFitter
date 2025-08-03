@@ -6,7 +6,7 @@
     <title>Interactive Djordjevic-Sarkar Model Fitter</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
@@ -127,7 +127,7 @@
                                 </button>
                             </div>
                         </div>
-                        
+
                         <!-- Fit Quality Indicator -->
                         <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
                             <div class="flex items-center justify-between">
@@ -143,7 +143,7 @@
                                 <div id="warnings-container" class="space-y-1"></div>
                             </div>
                         </div>
-                        
+
                         <div class="space-y-6">
                             <!-- eps_inf -->
                             <div>
@@ -211,7 +211,7 @@
         const reportOutput = document.getElementById('report-output');
         const errorBox = document.getElementById('error-box');
         const errorMessage = document.getElementById('error-message');
-        
+
         // Parameter Controls
         const paramControls = {
             eps_inf: { slider: document.getElementById('eps_inf_slider'), input: document.getElementById('eps_inf_input') },
@@ -287,7 +287,7 @@ class ReportEvaluation:
             for warning in self.warnings:
                 lines.append(f"- {warning}")
         return "\\n".join(lines)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert evaluation to dictionary format."""
         return {
@@ -295,12 +295,12 @@ class ReportEvaluation:
             'overall_category': self.overall.category,
             'metrics': {
                 k: {
-                    'score': v.score, 
-                    'category': v.category, 
+                    'score': v.score,
+                    'category': v.category,
                     'value': v.value,
                     'suggestion': v.suggestion,
                     'details': v.details
-                } 
+                }
                 for k, v in self.metrics.items()
             },
             'suggestions': self.suggestions,
@@ -350,10 +350,10 @@ class FitEvaluator:
                             correlations[(param_names[i], param_names[j])] = corr_matrix[i][j]
             except (IndexError, TypeError) as e:
                 logger.warning(f"Error parsing correlation matrix: {e}")
-        
+
         # Include parameters for physical validation
         params = json_data.get('parameters', {})
-        
+
         return {
             'n_data_points': fit_stats.get('n_data_points', 0),
             'n_variables': fit_stats.get('n_variables', 4),
@@ -401,29 +401,29 @@ class FitEvaluator:
             warnings.append("Reduced chi-square > 1 - model may be inadequate")
         if report.get('rms_real', 0) < 0 or report.get('rms_imag', 0) < 0:
             warnings.append("Negative RMS values detected - calculation error")
-        
+
         # Additional physical sanity checks
-        
+
         # Δε sign check - compare with trend in real permittivity
         delta_eps = report.get('delta_eps', 0)
         eps_inf = report.get('eps_inf', 0)
         mean_real = report.get('mean_real', 0)
         if delta_eps != 0 and (delta_eps * (eps_inf - mean_real) < 0):
             warnings.append("Δε sign is opposite to trend in ε′(f) – verify data order")
-        
+
         # ω₂ > ω₁ check from parameters if available
         params = report.get('parameters', {})
         omega1 = params.get('omega1', 0)
         omega2 = params.get('omega2', 0)
         if omega1 > 0 and omega2 > 0 and omega2 <= omega1:
             warnings.append("Unphysical ω₂ ≤ ω₁ encountered – fit may be invalid")
-        
+
         # Check for unreasonably large or small dielectric constant
         if eps_inf < 1.0:
             warnings.append("ε_inf < 1.0 is unphysical for most materials")
         elif eps_inf > 1000:
             warnings.append("ε_inf > 1000 is unusually high - check units and data")
-        
+
         # Check for extremely large frequency separations
         if omega1 > 0 and omega2 > 0:
             ratio = omega2 / omega1
@@ -431,7 +431,7 @@ class FitEvaluator:
                 warnings.append("ω₂/ω₁ > 1000 suggests very broad relaxation - consider multi-pole model")
             elif ratio < 1.1:
                 warnings.append("ω₂/ω₁ < 1.1 suggests narrow relaxation - numerical issues possible")
-        
+
         return warnings
 
     def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
@@ -481,7 +481,7 @@ class FitEvaluator:
 
         self._validate_report(report)
         warnings = self._validate_physical_bounds(report)
-        
+
         metrics: Dict[str, MetricResult] = {}
         suggestions: List[str] = []
 
@@ -514,7 +514,7 @@ class FitEvaluator:
         else:
             worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
             corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
-        
+
         corr_result = MetricResult(
             'correlation', corr_score, corr_cat,
             worst_val, corr_sug, details={'pair': worst_pair}
@@ -526,11 +526,11 @@ class FitEvaluator:
         # Overall score
         total_weight = sum(self.weights.values())
         overall_score = sum(
-            metrics[k].score * self.weights.get(k, 1) 
-            for k in metrics.keys() 
+            metrics[k].score * self.weights.get(k, 1)
+            for k in metrics.keys()
             if k in self.weights
         ) / total_weight
-        
+
         if overall_score >= 90:
             overall_cat = "Godly"
         elif overall_score >= 75:
@@ -571,7 +571,7 @@ def estimate_initial_parameters(f_ghz, complex_epsilon):
     delta_eps_init = eps_s_init - eps_inf_init
     omega1_init = 2 * np.pi * (f_ghz[0] if len(f_ghz) > 0 else 1.0) * 1e9
     omega2_init = 2 * np.pi * (f_ghz[-1] if len(f_ghz) > 0 else 100.0) * 1e9
-    
+
     return {
         'eps_inf': eps_inf_init,
         'delta_eps': delta_eps_init,
@@ -583,10 +583,10 @@ def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
     global global_f_ghz
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-    
+
     f_ghz = global_f_ghz
     omega = 2 * np.pi * f_ghz * 1e9
-    
+
     with np.errstate(divide='ignore', invalid='ignore'):
         if omega2 <= 0 or omega1 <= 0 or omega2 <= omega1:
             eps_prime = np.full_like(f_ghz, np.nan)
@@ -596,7 +596,7 @@ def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
             eps_prime = eps_inf + (delta_eps / (2 * np.log(omega2 / omega1))) * log_term
             atan_term = np.arctan(omega / omega1) - np.arctan(omega / omega2)
             eps_double_prime = -(delta_eps / np.log(omega2 / omega1)) * atan_term
-    
+
     return json.dumps({
         "eps_prime": eps_prime.tolist(),
         "eps_double_prime": eps_double_prime.tolist()
@@ -605,7 +605,7 @@ def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
 def calculate_model(params, f_ghz):
     p = params
     omega = 2 * np.pi * f_ghz * 1e9
-    
+
     with np.errstate(divide='ignore', invalid='ignore'):
         if p['omega2'] <= 0 or p['omega1'] <= 0 or p['omega2'] <= p['omega1']:
             eps_prime = np.full_like(f_ghz, np.nan)
@@ -615,20 +615,20 @@ def calculate_model(params, f_ghz):
             eps_prime = p['eps_inf'] + (p['delta_eps'] / (2 * np.log(p['omega2'] / p['omega1']))) * log_term
             atan_term = np.arctan(omega / p['omega1']) - np.arctan(omega / p['omega2'])
             eps_double_prime = -(p['delta_eps'] / np.log(p['omega2'] / p['omega1'])) * atan_term
-    
+
     return eps_prime + 1j * eps_double_prime
 
 def residual(params, f_ghz, complex_epsilon_data):
     p_dict = params.valuesdict()
     model_epsilon = calculate_model(p_dict, f_ghz)
-    
+
     # Dynamic‑range scaling factors
     scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
     scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
-    
+
     real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data)) / scale_real
     imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data)) / scale_imag
-    
+
     return np.concatenate([real_residual, imag_residual])
 
 def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
@@ -636,25 +636,25 @@ def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
     param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
     n_params = len(param_names)
     n_data = len(f_ghz) * 2  # real and imag parts
-    
+
     jacobian = np.zeros((n_data, n_params))
-    
+
     # Base model
     base_model = calculate_model(params_dict, f_ghz)
     base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
-    
+
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
         # Use relative step: Δp = rel · |p| + abs_min
         step = rel_step * abs(params_dict[param_name]) + abs_step
         params_plus = params_dict.copy()
         params_plus[param_name] += step
-        
+
         model_plus = calculate_model(params_plus, f_ghz)
         residual_plus = np.concatenate([np.real(model_plus), np.imag(model_plus)])
-        
+
         jacobian[:, i] = (residual_plus - base_residual) / step
-    
+
     return jacobian
 
 def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
@@ -662,27 +662,27 @@ def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
     try:
         # Calculate Jacobian
         J = calculate_jacobian(params_dict, f_ghz)
-        
+
         # Calculate covariance matrix: (J^T J)^-1
         JTJ = np.dot(J.T, J)
-        
+
         # Add small regularization to ensure positive definite
         JTJ += np.eye(JTJ.shape[0]) * 1e-10
-        
+
         # Calculate covariance
         cov_matrix = np.linalg.inv(JTJ)
-        
+
         # Convert to correlation matrix
         std_devs = np.sqrt(np.diag(cov_matrix))
         corr_matrix = np.zeros_like(cov_matrix)
-        
+
         for i in range(len(std_devs)):
             for j in range(len(std_devs)):
                 if std_devs[i] > 0 and std_devs[j] > 0:
                     corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
                 else:
                     corr_matrix[i, j] = 0
-        
+
         return corr_matrix
     except:
         return None
@@ -691,17 +691,17 @@ def format_correlation_matrix(corr_matrix):
     """Format correlation matrix for display"""
     if corr_matrix is None:
         return "Unable to calculate correlation matrix"
-    
+
     param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
     result = "Correlations:\\n"
-    
+
     for i, param1 in enumerate(param_names):
         for j, param2 in enumerate(param_names):
             if j > i:  # Only show upper triangle
                 correlation = corr_matrix[i, j]
                 if abs(correlation) > 0.1:  # Only show significant correlations
                     result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
-    
+
     return result
 
 def create_updated_report(eps_inf, delta_eps, omega1, omega2):
@@ -711,16 +711,16 @@ def create_updated_report(eps_inf, delta_eps, omega1, omega2):
 
     params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
     model_epsilon = calculate_model(params, global_f_ghz)
-    
+
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
+
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 4
     chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     rss = chi_sqr                                # same symbol, more explicit
     red_chi_sqr = rss / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-    
+
     # Information criteria
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
@@ -832,22 +832,22 @@ def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
     global global_f_ghz, global_complex_epsilon
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-    
+
     # Get current report data
     params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
     model_epsilon = calculate_model(params, global_f_ghz)
-    
+
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
+
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 4
     chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-    
+
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
-    
+
     # Create JSON report format
     json_report = {
         "model": "Djordjevic-Sarkar",
@@ -880,7 +880,7 @@ def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
         },
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
-    
+
     # Evaluate the fit
     try:
         evaluator = FitEvaluator()
@@ -890,7 +890,7 @@ def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
     except Exception as e:
         logger.warning(f"Could not evaluate fit: {e}")
         json_report['evaluation'] = None
-    
+
     return json.dumps(json_report)
 
 def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
@@ -900,9 +900,9 @@ def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
 
     params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
     fitted_epsilon = calculate_model(params, global_f_ghz)
-    
+
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-    
+
     ax1.plot(global_f_ghz, np.real(global_complex_epsilon), 'ko', label='Measured')
     ax1.plot(global_f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
     ax1.set_xlabel('Frequency (GHz)')
@@ -922,7 +922,7 @@ def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
     ax2.grid(True, alpha=0.5)
 
     plt.tight_layout()
-    
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=150)
     plt.close(fig)
@@ -932,11 +932,11 @@ def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
 def run_analysis(csv_content, method):
     global global_f_ghz, global_complex_epsilon, global_correlation_matrix, global_measured_dk, global_measured_df
     f_ghz, complex_epsilon_data = load_data(csv_content)
-    
+
     # Store measured data globally
     global_measured_dk = np.real(complex_epsilon_data).tolist()
     global_measured_df = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
-    
+
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data)
     params = Parameters()
     dk_data = np.real(complex_epsilon_data)
@@ -944,24 +944,24 @@ def run_analysis(csv_content, method):
     params.add('delta_eps', value=initial_params['delta_eps'], min=-10, max=10)
     omega1_min_rad = 2 * np.pi * 0.1e9
     omega2_max_rad = 2 * np.pi * 1500e9
-    
+
     # Characteristic frequency 1 (free)
     params.add('omega1', value=initial_params['omega1'], min=omega1_min_rad, max=omega2_max_rad)
-    
+
     # Logarithmic ratio r = ln(ω₂/ω₁) – must stay positive
     params.add('log_omega_ratio',
                value=np.log(initial_params['omega2']/initial_params['omega1']),
                min=0.1,    # ω₂ ≳ 1.1 × ω₁
                max=5.0)    # ω₂ ≤ e⁵ ≈ 150× ω₁
-    
+
     # ω₂ is now defined from ω₁ and r; no independent stepping into invalid region
     params.add('omega2', expr='omega1 * exp(log_omega_ratio)')
-    
+
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data))
     result = minimizer.minimize(method=method)
-    
+
     fit_params = {p: float(v.value) for p, v in result.params.items()}
-    
+
     # Calculate AIC and BIC
     fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
     real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
@@ -971,7 +971,7 @@ def run_analysis(csv_content, method):
     rss = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
-    
+
     # Extract correlation matrix from fit result
     correlations_str = ""
     if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
@@ -983,10 +983,10 @@ def run_analysis(csv_content, method):
                     corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
                     if abs(corr_val) > 0.1:
                         correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
-    
+
     # Generate standard LMFit table
     report_content = fit_report(result).replace('[[', '').replace(']]', '')
-    
+
     # Append 95% confidence intervals where available
     ci_lines = ["\\nParameter uncertainties (1σ):"]
     for name, par in result.params.items():
@@ -994,9 +994,9 @@ def run_analysis(csv_content, method):
             ci_lines.append(f"    {name:12s}: uncertainty not estimated")
         else:
             ci_lines.append(f"    {name:12s}: ±{par.stderr:.4g}")
-    
+
     report_content += "\\n" + "\\n".join(ci_lines)
-    
+
     model_section = f"""Model and Parameters
 --------------------------------------------------
 ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
@@ -1012,10 +1012,10 @@ Information Criteria:
     AIC = {aic:.4f}
     BIC = {bic:.4f}
 """
-    
+
     full_report = f"Djordjevic-Sarkar Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{report_content}"
     plot_json = create_plotly_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
-    
+
     return_data = {
         "report": full_report,
         "plot_json": plot_json,
@@ -1032,13 +1032,17 @@ Information Criteria:
             setLoadingState(true, 'Initializing Environment...');
             try {
                 pyodide = await loadPyodide({
-                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"
+                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.27.0/full/"
                 });
                 setLoadingState(true, 'Loading Python Packages...');
                 await pyodide.loadPackage(['numpy', 'pandas', 'micropip', 'matplotlib']);
                 const micropip = pyodide.pyimport('micropip');
-                setLoadingState(true, 'Installing lmfit & plotly...');
-                await micropip.install(['lmfit', 'plotly']);
+                setLoadingState(true, 'Installing lmfit, plotly & scipy...');
+                await micropip.install([
+                    'lmfit==1.3.1',
+                    'plotly==5.19.0',
+                    'scipy==1.11.4'
+                ]);
                 isPyodideReady = true;
                 await pyodide.runPythonAsync(pythonScript);
                 setLoadingState(false);
@@ -1084,7 +1088,7 @@ Information Criteria:
                 omega1: f1_ghz,
                 omega2: f2_ghz
             };
-            
+
             const ranges = {
                 eps_inf: { min: 1, max: Math.max(uiParams.eps_inf * 2, 10), step: 0.01 },
                 delta_eps: { min: -10, max: 10, step: 0.01 },
@@ -1096,12 +1100,12 @@ Information Criteria:
                 if (paramControls[key]) {
                     const { slider, input } = paramControls[key];
                     const range = ranges[key];
-                    
+
                     slider.min = range.min;
                     slider.max = range.max;
                     slider.step = range.step;
                     slider.value = uiParams[key];
-                    
+
                     input.min = range.min;
                     input.max = range.max;
                     input.step = range.step;
@@ -1112,7 +1116,7 @@ Information Criteria:
 
         async function updateUIFromControls() {
             if (!currentData || !pyodide) return;
-            
+
             const eps_inf = parseFloat(paramControls.eps_inf.input.value);
             const delta_eps = parseFloat(paramControls.delta_eps.input.value);
             const f1_ghz = parseFloat(paramControls.omega1.input.value);
@@ -1134,7 +1138,7 @@ Information Criteria:
                 const calculateFunc = pyodide.globals.get('calculate_model_from_params');
                 const modelJson = calculateFunc(eps_inf, delta_eps, omega1, omega2);
                 const modelResults = JSON.parse(modelJson);
-                
+
                 if (modelResults.error) return;
 
                 const fittedDk = modelResults.eps_prime;
@@ -1146,42 +1150,42 @@ Information Criteria:
                 const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
                 const reportData = JSON.parse(reportJson);
                 reportOutput.textContent = reportData.report;
-                
+
                 // Update fit quality indicator
                 const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
                 const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
                 const evaluationData = JSON.parse(evaluationJson);
-                
+
                 if (evaluationData.evaluation) {
                     updateFitQualityIndicator(evaluationData.evaluation);
                 }
-                
+
             } catch (err) {
                 console.error('Error updating UI:', err);
             }
         }
-        
+
         function updateFitQualityIndicator(evaluation) {
             const indicator = document.getElementById('fit-quality-indicator');
             const scoreSpan = document.getElementById('fit-quality-score');
             const bar = document.getElementById('fit-quality-bar');
             const warningsDiv = document.getElementById('fit-warnings');
             const warningsContainer = document.getElementById('warnings-container');
-            
+
             if (!evaluation) {
                 indicator.classList.add('hidden');
                 return;
             }
-            
+
             indicator.classList.remove('hidden');
             const score = evaluation.overall_score;
             const category = evaluation.overall_category;
-            
+
             scoreSpan.textContent = `${score} (${category})`;
-            
+
             // Update bar width and color
             bar.style.width = `${score}%`;
-            
+
             if (score >= 90) {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-green-500';
                 indicator.className = 'mb-4 p-3 rounded-lg bg-green-50 border border-green-200';
@@ -1195,12 +1199,12 @@ Information Criteria:
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-red-500';
                 indicator.className = 'mb-4 p-3 rounded-lg bg-red-50 border border-red-200';
             }
-            
+
             // Display warnings as colored badges
             if (evaluation.warnings && evaluation.warnings.length > 0) {
                 warningsDiv.classList.remove('hidden');
                 warningsContainer.innerHTML = '';
-                
+
                 evaluation.warnings.forEach(warning => {
                     const badge = document.createElement('div');
                     badge.className = 'inline-block bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full border border-orange-200';
@@ -1212,23 +1216,23 @@ Information Criteria:
                 warningsDiv.classList.add('hidden');
             }
         }
-        
+
         function resetParameters() {
             if (!currentData || !currentData.fitted_params) return;
             setupParameterControls(currentData.fitted_params);
-            
+
             const plotData = JSON.parse(currentData.plot_json);
             Plotly.restyle('plot-output', {
                 y: [plotData.data[1].y, plotData.data[3].y]
             }, [1, 3]);
             reportOutput.textContent = currentData.report;
-            
+
             // Update fit quality for reset parameters
             const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
             const params = currentData.fitted_params;
             const evaluationJson = evaluateFunc(params.eps_inf, params.delta_eps, params.omega1, params.omega2);
             const evaluationData = JSON.parse(evaluationJson);
-            
+
             if (evaluationData.evaluation) {
                 updateFitQualityIndicator(evaluationData.evaluation);
             }
@@ -1253,7 +1257,7 @@ Information Criteria:
                 const calculateFunc = pyodide.globals.get('calculate_model_from_params');
                 const modelJson = calculateFunc(eps_inf, delta_eps, omega1, omega2);
                 const modelResults = JSON.parse(modelJson);
-                
+
                 let csvContent = "Frequency_GHz,fitted_Dk,fitted_Df\n";
                 currentData.f_ghz.forEach((f, i) => {
                     const dk = modelResults.eps_prime[i];
@@ -1276,16 +1280,16 @@ Information Criteria:
                 const generateReportFunc = pyodide.globals.get('create_updated_report');
                 const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
                 const reportData = JSON.parse(reportJson);
-                
+
                 // Get evaluation for current parameters
                 const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
                 const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
                 const evaluationData = JSON.parse(evaluationJson);
-                
+
                 // Get measured data from currentData
                 let measuredDk = currentData.measured_dk || [];
                 let measuredDf = currentData.measured_df || [];
-                
+
                 // Add additional fields to JSON
                 const fullJsonReport = {
                     ...reportData.json_data,
@@ -1305,9 +1309,9 @@ Information Criteria:
                     },
                     evaluation: evaluationData.evaluation
                 };
-                
+
                 zip.file(`${baseFilename}_report.json`, JSON.stringify(fullJsonReport, null, 2));
-                
+
                 // 5. Add evaluation report as separate markdown file
                 if (evaluationData.evaluation && evaluationData.evaluation.markdown_table) {
                     zip.file(`${baseFilename}_evaluation.md`, evaluationData.evaluation.markdown_table);
@@ -1347,7 +1351,7 @@ Information Criteria:
                 clearTimeout(updateTimeout);
                 updateTimeout = setTimeout(updateUIFromControls, 50);
             });
-            
+
             input.addEventListener('input', (e) => {
                 slider.value = e.target.value;
                 // Additional constraint handling for omega controls
@@ -1393,10 +1397,10 @@ Information Criteria:
                 const fitMethod = fitMethodSelect.value;
                 const resultJson = runAnalysis(fileContent, fitMethod);
                 const result = JSON.parse(resultJson);
-                
+
                 currentData = result;
                 originalCorrelations = result.correlations;
-                
+
                 const plotData = JSON.parse(result.plot_json);
                 plotOutput.innerHTML = '';
                 Plotly.newPlot('plot-output', plotData.data, plotData.layout, {responsive: true});
@@ -1407,21 +1411,21 @@ Information Criteria:
 
                 reportOutput.textContent = result.report;
                 setupParameterControls(result.fitted_params);
-                
+
                 // Show initial fit quality
                 const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
                 const eps_inf = result.fitted_params.eps_inf;
                 const delta_eps = result.fitted_params.delta_eps;
                 const omega1 = result.fitted_params.omega1;
                 const omega2 = result.fitted_params.omega2;
-                
+
                 const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
                 const evaluationData = JSON.parse(evaluationJson);
-                
+
                 if (evaluationData.evaluation) {
                     updateFitQualityIndicator(evaluationData.evaluation);
                 }
-                
+
                 outputDiv.classList.remove('hidden');
 
             } catch (err) {
@@ -1431,7 +1435,7 @@ Information Criteria:
                 setLoadingState(false);
             }
         });
-        
+
         resetButton.addEventListener('click', resetParameters);
         downloadButton.addEventListener('click', downloadResults);
 
