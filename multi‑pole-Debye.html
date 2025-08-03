@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive Djordjevic-Sarkar Model Fitter</title>
+    <title>Interactive Multi-Pole Debye Model Fitter</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
@@ -56,14 +56,19 @@
             cursor: pointer;
             border-radius: 50%;
         }
+        .pole-controls {
+            border-left: 3px solid #3b82f6;
+            padding-left: 1rem;
+            margin-bottom: 1.5rem;
+        }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800">
 
     <div class="container mx-auto p-4 md:p-8 max-w-7xl">
         <header class="text-center mb-8">
-            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Interactive Dielectric Data Fitter</h1>
-            <p class="mt-2 text-lg text-gray-600">Upload your dielectric spectroscopy data (CSV) to fit it to the Djordjevic-Sarkar model.</p>
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Multi-Pole Debye Model Fitter</h1>
+            <p class="mt-2 text-lg text-gray-600">Upload your dielectric spectroscopy data (CSV) to fit it to the Multi-Pole Debye model.</p>
         </header>
 
         <div class="bg-white rounded-xl shadow-lg p-6 md:p-8">
@@ -82,10 +87,25 @@
                             hover:file:bg-blue-100
                         ">
                     </div>
-                     <p class="text-xs text-gray-500 mt-2">Expected columns: Frequency (GHz), Dk, Df</p>
+                    <p class="text-xs text-gray-500 mt-2">
+                        CSV columns in order:
+                        Frequency&nbsp;(GHz),&nbsp;Dk&nbsp;(real&nbsp;permittivity),
+                        Df&nbsp;(loss&nbsp;tangent&nbsp;<em>tan δ</em>)
+                    </p>
+
                 </div>
                 <div class="space-y-4">
-                     <div>
+                    <div>
+                        <label for="n-poles" class="block text-sm font-medium text-gray-700">Number of Debye Poles</label>
+                        <select id="n-poles" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                            <option value="auto" selected>Auto-detect</option>
+                            <option value="1">1 Pole</option>
+                            <option value="2">2 Poles</option>
+                            <option value="3">3 Poles</option>
+                            <option value="4">4 Poles</option>
+                        </select>
+                    </div>
+                    <div>
                         <label for="fit-method" class="block text-sm font-medium text-gray-700">Optimization Method</label>
                         <select id="fit-method" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
                             <option value="least_squares" selected>least_squares (Default)</option>
@@ -127,7 +147,7 @@
                                 </button>
                             </div>
                         </div>
-                        
+
                         <!-- Fit Quality Indicator -->
                         <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
                             <div class="flex items-center justify-between">
@@ -143,32 +163,16 @@
                                 <div id="warnings-container" class="space-y-1"></div>
                             </div>
                         </div>
-                        
-                        <div class="space-y-6">
+
+                        <div id="params-container" class="space-y-6">
                             <!-- eps_inf -->
                             <div>
-                                <label for="eps_inf_slider" class="block text-sm font-medium text-gray-700">ε<sub>inf</sub> (Epsilon Infinity)</label>
+                                <label for="eps_inf_slider" class="block text-sm font-medium text-gray-700">ε<sub>∞</sub> (Epsilon Infinity)</label>
                                 <input type="range" id="eps_inf_slider" class="mt-1">
                                 <input type="number" id="eps_inf_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
                             </div>
-                            <!-- delta_eps -->
-                            <div>
-                                <label for="delta_eps_slider" class="block text-sm font-medium text-gray-700">Δε (Delta Epsilon)</label>
-                                <input type="range" id="delta_eps_slider" class="mt-1">
-                                <input type="number" id="delta_eps_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                            </div>
-                            <!-- f1 -->
-                            <div>
-                                <label for="omega1_slider" class="block text-sm font-medium text-gray-700">f<sub>1</sub> (GHz)</label>
-                                <input type="range" id="omega1_slider" class="mt-1">
-                                <input type="number" id="omega1_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                            </div>
-                            <!-- f2 -->
-                            <div>
-                                <label for="omega2_slider" class="block text-sm font-medium text-gray-700">f<sub>2</sub> (GHz)</label>
-                                <input type="range" id="omega2_slider" class="mt-1">
-                                <input type="number" id="omega2_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
-                            </div>
+                            <!-- Dynamic pole controls will be added here -->
+                            <div id="pole-controls-container"></div>
                         </div>
                     </div>
                 </div>
@@ -191,7 +195,7 @@
             <p>Powered by Pyodide, lmfit, and plotly</p>
             <div class="border-t border-gray-300 pt-2 mt-2">
             <p class="font-semibold text-gray-700">Citation</p>
-            <p class="italic">Meddeb, B., & Meddeb, A. (2025). QuickFitter: Interactive Dielectric Data Fitting Tool.
+            <p class="italic">Meddeb, B., & Meddeb, A. (2025). QuickFitter: Interactive Dielectric Data Fitting Tool - Multi-Pole Debye Model.
             <br>Available at: <a href="https://github.com/bmeddeb/QuickFitter" class="text-blue-600 hover:underline">https://github.com/bmeddeb/QuickFitter</a></p>
         </div>
         </footer>
@@ -204,6 +208,7 @@
         const resetButton = document.getElementById('reset-button');
         const downloadButton = document.getElementById('download-button');
         const fitMethodSelect = document.getElementById('fit-method');
+        const nPolesSelect = document.getElementById('n-poles');
         const statusDiv = document.getElementById('status');
         const statusMessage = document.getElementById('status-message');
         const outputDiv = document.getElementById('output');
@@ -211,14 +216,7 @@
         const reportOutput = document.getElementById('report-output');
         const errorBox = document.getElementById('error-box');
         const errorMessage = document.getElementById('error-message');
-        
-        // Parameter Controls
-        const paramControls = {
-            eps_inf: { slider: document.getElementById('eps_inf_slider'), input: document.getElementById('eps_inf_input') },
-            delta_eps: { slider: document.getElementById('delta_eps_slider'), input: document.getElementById('delta_eps_input') },
-            omega1: { slider: document.getElementById('omega1_slider'), input: document.getElementById('omega1_input') },
-            omega2: { slider: document.getElementById('omega2_slider'), input: document.getElementById('omega2_input') },
-        };
+        const poleControlsContainer = document.getElementById('pole-controls-container');
 
         // Global State
         let pyodide = null;
@@ -226,7 +224,8 @@
         let isPyodideReady = false;
         let currentData = null;
         let originalFilename = '';
-        let originalCorrelations = null;
+        let currentPoleControls = {};
+        let currentNPoles = 0;
 
         // Python Script
         const pythonScript = `
@@ -247,12 +246,13 @@ import math
 import logging
 from typing import Dict, Tuple, Any, List, Optional
 from dataclasses import dataclass, field
+from scipy.signal import find_peaks
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Fit Evaluator Classes
+# Fit Evaluator Classes (same as before with adapted thresholds)
 @dataclass
 class MetricResult:
     """Stores the evaluation result for a single metric."""
@@ -287,7 +287,7 @@ class ReportEvaluation:
             for warning in self.warnings:
                 lines.append(f"- {warning}")
         return "\\n".join(lines)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert evaluation to dictionary format."""
         return {
@@ -295,12 +295,12 @@ class ReportEvaluation:
             'overall_category': self.overall.category,
             'metrics': {
                 k: {
-                    'score': v.score, 
-                    'category': v.category, 
+                    'score': v.score,
+                    'category': v.category,
                     'value': v.value,
                     'suggestion': v.suggestion,
                     'details': v.details
-                } 
+                }
                 for k, v in self.metrics.items()
             },
             'suggestions': self.suggestions,
@@ -311,11 +311,11 @@ class ReportEvaluation:
 class FitEvaluator:
     """Evaluates the quality of a fit report based on configurable metrics."""
     DEFAULT_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
-        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Revisit noise model or add a relaxation term."),
-        "rms_real":           (0.005, 0.010, 0.020, "Loosen bounds or refine initial ε_inf/Δε."),
-        "rms_imag":           (0.001, 0.002, 0.005, "Add extra pole or use a hybrid model for loss plateau."),
-        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias at low frequencies."),
-        "aic":                (2, 7, 14, "Consider a simpler model or regularisation."),
+        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Consider adding more poles or adjusting relaxation times."),
+        "rms_real":           (0.005, 0.010, 0.020, "Refine initial ε_∞ or pole strengths Δε_i."),
+        "rms_imag":           (0.001, 0.002, 0.005, "Add extra pole or adjust time constants τ_i."),
+        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias, consider frequency-dependent effects."),
+        "aic":                (2, 7, 14, "Consider reducing number of poles."),
         "bic":                (2, 7, 14, "Model complexity not justified by data."),
     }
 
@@ -342,7 +342,10 @@ class FitEvaluator:
         corr_matrix = json_data.get('correlation_matrix', [])
         correlations = {}
         if corr_matrix and isinstance(corr_matrix, list):
-            param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
+            n_poles = json_data.get('parameters', {}).get('n_poles', 1)
+            param_names = ['eps_inf']
+            for i in range(n_poles):
+                param_names.extend([f'delta_eps_{i}', f'tau_{i}'])
             try:
                 for i in range(len(corr_matrix)):
                     for j in range(i+1, len(corr_matrix[0])):
@@ -350,10 +353,10 @@ class FitEvaluator:
                             correlations[(param_names[i], param_names[j])] = corr_matrix[i][j]
             except (IndexError, TypeError) as e:
                 logger.warning(f"Error parsing correlation matrix: {e}")
-        
+
         # Include parameters for physical validation
         params = json_data.get('parameters', {})
-        
+
         return {
             'n_data_points': fit_stats.get('n_data_points', 0),
             'n_variables': fit_stats.get('n_variables', 4),
@@ -367,7 +370,7 @@ class FitEvaluator:
             'correlations': correlations,
             'parameters': params,
             'eps_inf': params.get('eps_inf', 0),
-            'delta_eps': params.get('delta_eps', 0)
+            'n_poles': params.get('n_poles', 1)
         }
 
     def _validate_report(self, report: Dict[str, Any]) -> None:
@@ -388,7 +391,7 @@ class FitEvaluator:
             raise ValueError(f"Invalid report data: {e}")
 
     def _validate_physical_bounds(self, report: Dict[str, Any]) -> List[str]:
-        """Check if values are physically reasonable."""
+        """Check if values are physically reasonable for Multi-Pole Debye."""
         warnings = []
         if report.get('rms_real', 0) > 1.0:
             warnings.append("RMS real part unusually high - check data quality")
@@ -398,40 +401,31 @@ class FitEvaluator:
         if rcs < 1e-6 and rcs > 0:
             warnings.append("Reduced chi-square suspiciously low - possible overfitting")
         elif rcs > 1.0:
-            warnings.append("Reduced chi-square > 1 - model may be inadequate")
-        if report.get('rms_real', 0) < 0 or report.get('rms_imag', 0) < 0:
-            warnings.append("Negative RMS values detected - calculation error")
-        
-        # Additional physical sanity checks
-        
-        # Δε sign check - compare with trend in real permittivity
-        delta_eps = report.get('delta_eps', 0)
+            warnings.append("Reduced chi-square > 1 - consider adding more poles")
+
+        # Check epsilon infinity
         eps_inf = report.get('eps_inf', 0)
-        mean_real = report.get('mean_real', 0)
-        if delta_eps != 0 and (delta_eps * (eps_inf - mean_real) < 0):
-            warnings.append("Δε sign is opposite to trend in ε′(f) – verify data order")
-        
-        # ω₂ > ω₁ check from parameters if available
-        params = report.get('parameters', {})
-        omega1 = params.get('omega1', 0)
-        omega2 = params.get('omega2', 0)
-        if omega1 > 0 and omega2 > 0 and omega2 <= omega1:
-            warnings.append("Unphysical ω₂ ≤ ω₁ encountered – fit may be invalid")
-        
-        # Check for unreasonably large or small dielectric constant
         if eps_inf < 1.0:
-            warnings.append("ε_inf < 1.0 is unphysical for most materials")
+            warnings.append("ε_∞ < 1.0 is unusual for dielectric materials")
         elif eps_inf > 1000:
-            warnings.append("ε_inf > 1000 is unusually high - check units and data")
-        
-        # Check for extremely large frequency separations
-        if omega1 > 0 and omega2 > 0:
-            ratio = omega2 / omega1
-            if ratio > 1000:
-                warnings.append("ω₂/ω₁ > 1000 suggests very broad relaxation - consider multi-pole model")
-            elif ratio < 1.1:
-                warnings.append("ω₂/ω₁ < 1.1 suggests narrow relaxation - numerical issues possible")
-        
+            warnings.append("ε_∞ > 1000 is unusually high - check units and data")
+
+        # Check number of poles vs data points
+        n_poles = report.get('n_poles', 1)
+        n_data_points = report.get('n_data_points', 0)
+        if n_poles > 0 and n_data_points > 0:
+            params_per_pole = 2  # delta_eps and tau for each pole
+            total_params = 1 + n_poles * params_per_pole  # eps_inf + poles
+            if total_params > n_data_points / 3:
+                warnings.append(f"Too many poles ({n_poles}) for data size - risk of overfitting")
+
+        # Check for relaxation time constants in parameters
+        params = report.get('parameters', {})
+        for i in range(n_poles):
+            tau = params.get(f'tau_{i}', None)
+            if tau is not None and tau <= 0:
+                warnings.append(f"Non-positive τ_{i} detected - unphysical relaxation time")
+
         return warnings
 
     def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
@@ -466,8 +460,8 @@ class FitEvaluator:
         elif abs_corr < 0.80:
             return 80, "Moderate", None
         elif abs_corr < 0.95:
-            return 60, "High", "Inspect uncertainties; consider fixing one parameter."
-        return 30, "Very High", "Fix or remove one highly correlated parameter."
+            return 60, "High", "Consider merging poles or fixing parameters."
+        return 30, "Very High", "Poles may be redundant - reduce number of poles."
 
     def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
         """Validates and evaluates a fit report dictionary."""
@@ -481,7 +475,7 @@ class FitEvaluator:
 
         self._validate_report(report)
         warnings = self._validate_physical_bounds(report)
-        
+
         metrics: Dict[str, MetricResult] = {}
         suggestions: List[str] = []
 
@@ -492,7 +486,7 @@ class FitEvaluator:
         # Data-points-per-variable
         dpv = report['n_data_points'] / report['n_variables']
         dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
-        dpv_sug = "Collect more data or simplify model." if dpv_cat == "Poor" else None
+        dpv_sug = "Collect more data or reduce number of poles." if dpv_cat == "Poor" else None
         metrics['dpv'] = MetricResult('dpv', dpv_score, dpv_cat, dpv, dpv_sug)
         if dpv_sug:
             suggestions.append(dpv_sug)
@@ -514,7 +508,7 @@ class FitEvaluator:
         else:
             worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
             corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
-        
+
         corr_result = MetricResult(
             'correlation', corr_score, corr_cat,
             worst_val, corr_sug, details={'pair': worst_pair}
@@ -526,11 +520,11 @@ class FitEvaluator:
         # Overall score
         total_weight = sum(self.weights.values())
         overall_score = sum(
-            metrics[k].score * self.weights.get(k, 1) 
-            for k in metrics.keys() 
+            metrics[k].score * self.weights.get(k, 1)
+            for k in metrics.keys()
             if k in self.weights
         ) / total_weight
-        
+
         if overall_score >= 90:
             overall_cat = "Godly"
         elif overall_score >= 75:
@@ -549,6 +543,7 @@ global_complex_epsilon = None
 global_correlation_matrix = None
 global_measured_dk = None
 global_measured_df = None
+global_n_poles = None
 
 def load_data(csv_content):
     global global_f_ghz, global_complex_epsilon
@@ -564,183 +559,427 @@ def load_data(csv_content):
     except Exception as e:
         raise ValueError(f"Failed to parse CSV: {e}")
 
-def estimate_initial_parameters(f_ghz, complex_epsilon):
-    dk = np.real(complex_epsilon)
-    eps_inf_init = dk[-1] if len(dk) > 0 else 1.0
-    eps_s_init = dk[0] if len(dk) > 0 else 2.0
-    delta_eps_init = eps_s_init - eps_inf_init
-    omega1_init = 2 * np.pi * (f_ghz[0] if len(f_ghz) > 0 else 1.0) * 1e9
-    omega2_init = 2 * np.pi * (f_ghz[-1] if len(f_ghz) > 0 else 100.0) * 1e9
+def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=20):
+    """Perform a quick fit for BIC calculation with limited iterations."""
+    params = Parameters()
     
-    return {
-        'eps_inf': eps_inf_init,
-        'delta_eps': delta_eps_init,
-        'omega1': omega1_init,
-        'omega2': omega2_init,
-    }
+    # Add epsilon infinity
+    dk_data = np.real(complex_epsilon)
+    params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
+    
+    # Add poles
+    for i in range(n_poles):
+        params.add(f'delta_eps_{i}',
+                  value=initial_params.get(f'delta_eps_{i}', 0.5),
+                  min=-10,
+                  max=dk_data.max() - 1.0)
+        
+        params.add(f'tau_{i}',
+                  value=initial_params.get(f'tau_{i}', 1e-9),
+                  min=1e-15,
+                  max=1e-6)
+    
+    # Add constraints for ordered relaxation times
+    for i in range(1, n_poles):
+        params.add(f'tau_ratio_{i}', value=2.0, min=1.1, max=100)
+        params[f'tau_{i}'].expr = f'tau_{i-1} * tau_ratio_{i}'
+    
+    # Quick minimization with limited iterations
+    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon, n_poles))
+    result = minimizer.minimize(method='leastsq', max_nfev=max_iter)
+    
+    # Calculate BIC
+    residuals = residual(result.params, f_ghz, complex_epsilon, n_poles)
+    n_data = len(residuals)
+    n_params = n_poles * 2 + 1  # delta_eps and tau for each pole, plus eps_inf
+    rss = np.sum(residuals**2)
+    
+    if n_data > 0 and rss > 0:
+        bic = n_params * np.log(n_data) + n_data * np.log(rss / n_data)
+    else:
+        bic = np.inf
+    
+    return {'bic': bic, 'params': result.params.valuesdict(), 'rss': rss}
 
-def calculate_model_from_params(eps_inf, delta_eps, omega1, omega2):
+def select_poles_bic(f_ghz, complex_epsilon, max_poles=4):
+    """Select optimal number of poles using Bayesian Information Criterion."""
+    bic_best, best_n = np.inf, 1
+    bic_values = {}
+    
+    for n in range(1, max_poles + 1):
+        try:
+            # Get initial parameters for n poles
+            initial_params = estimate_initial_parameters(f_ghz, complex_epsilon, n)
+            
+            # Perform quick fit
+            fit_result = quick_single_fit(f_ghz, complex_epsilon, initial_params, n)
+            bic = fit_result['bic']
+            bic_values[n] = bic
+            
+            # Check if this model is significantly better (ΔBIC > 2)
+            if bic < bic_best - 2:
+                bic_best, best_n = bic, n
+                
+        except Exception as e:
+            logger.warning(f"BIC calculation failed for {n} poles: {e}")
+            continue
+    
+    logger.info(f"BIC values: {bic_values}")
+    logger.info(f"Selected {best_n} poles with BIC = {bic_best:.2f}")
+    
+    return best_n
+
+def detect_poles_second_derivative(f_ghz, complex_epsilon):
+    """Detect poles using second derivative of log(ε″)."""
+    eps_imag = -np.imag(complex_epsilon)
+    
+    # Remove zero or negative values for log
+    valid_mask = eps_imag > 1e-10
+    if np.sum(valid_mask) < 10:
+        return 1
+    
+    f_valid = f_ghz[valid_mask]
+    eps_valid = eps_imag[valid_mask]
+    
+    # Take log and smooth
+    log_eps = np.log(eps_valid)
+    
+    # Calculate derivatives using finite differences
+    if len(log_eps) < 5:
+        return 1
+    
+    # First derivative
+    d1_log_eps = np.gradient(log_eps, f_valid)
+    
+    # Second derivative
+    d2_log_eps = np.gradient(d1_log_eps, f_valid)
+    
+    # Find zero crossings of second derivative (inflection points)
+    zero_crossings = []
+    for i in range(1, len(d2_log_eps) - 1):
+        if d2_log_eps[i-1] * d2_log_eps[i+1] < 0:  # Sign change
+            zero_crossings.append(i)
+    
+    # Filter out closely spaced crossings
+    if len(zero_crossings) > 1:
+        filtered_crossings = [zero_crossings[0]]
+        for zc in zero_crossings[1:]:
+            if zc - filtered_crossings[-1] > len(d2_log_eps) // 10:  # Minimum separation
+                filtered_crossings.append(zc)
+        zero_crossings = filtered_crossings
+    
+    # Number of poles approximately equals number of inflection points
+    n_poles = max(1, min(len(zero_crossings), 4))
+    
+    return n_poles
+
+def detect_number_of_poles(f_ghz, complex_epsilon):
+    """Auto-detect the number of Debye poles using multiple methods."""
+    eps_imag = -np.imag(complex_epsilon)
+    
+    if len(eps_imag) < 5:
+        return 1, "insufficient_data"
+    
+    detection_method = None
+    
+    # Method 1: BIC-based selection (most robust)
+    try:
+        n_poles_bic = select_poles_bic(f_ghz, complex_epsilon, max_poles=4)
+    except Exception as e:
+        logger.warning(f"BIC method failed: {e}")
+        n_poles_bic = None
+    
+    # Method 2: Second derivative of log(ε″)
+    try:
+        n_poles_d2 = detect_poles_second_derivative(f_ghz, complex_epsilon)
+    except Exception as e:
+        logger.warning(f"Second derivative method failed: {e}")
+        n_poles_d2 = None
+    
+    # Method 3: Peak finding (fallback, improved)
+    try:
+        # Smooth the data with adaptive window
+        window = min(7, len(eps_imag) // 4)
+        if window >= 3:
+            smoothed = np.convolve(eps_imag, np.ones(window)/window, mode='valid')
+        else:
+            smoothed = eps_imag
+        
+        # Dynamic prominence based on noise level
+        noise_level = np.std(np.diff(smoothed))
+        prominence = max(0.02 * np.max(smoothed), 3 * noise_level)
+        
+        peaks, properties = find_peaks(smoothed, prominence=prominence, distance=len(smoothed)//10)
+        n_poles_peaks = len(peaks)
+        
+        if n_poles_peaks == 0:
+            n_poles_peaks = 1
+        elif n_poles_peaks > 4:
+            n_poles_peaks = 3
+    except Exception as e:
+        logger.warning(f"Peak finding method failed: {e}")
+        n_poles_peaks = 1
+    
+    # Combine results with preference for BIC
+    if n_poles_bic is not None:
+        n_poles = n_poles_bic
+        detection_method = "BIC"
+        logger.info(f"Using BIC method: {n_poles} poles")
+    elif n_poles_d2 is not None:
+        n_poles = n_poles_d2
+        detection_method = "second_derivative"
+        logger.info(f"Using second derivative method: {n_poles} poles")
+    else:
+        n_poles = n_poles_peaks
+        detection_method = "peak_finding"
+        logger.info(f"Using peak finding method: {n_poles} poles")
+    
+    return n_poles, detection_method
+
+def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None):
+    """Estimate initial parameters for Multi-Pole Debye model."""
+    dk = np.real(complex_epsilon)
+    df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
+
+    # Auto-detect poles if not specified
+    if n_poles is None or n_poles == 'auto':
+        n_poles, _ = detect_number_of_poles(f_ghz, complex_epsilon)
+
+    # Basic parameters
+    eps_inf = dk[-1] if len(dk) > 0 else 1.0
+    eps_s = dk[0] if len(dk) > 0 else 2.0
+    total_delta_eps = eps_s - eps_inf
+
+    # Initialize parameters dictionary
+    params = {'eps_inf': eps_inf, 'n_poles': n_poles}
+
+    if n_poles == 1:
+        # Single pole case
+        params['delta_eps_0'] = total_delta_eps
+        # Find frequency of maximum loss
+        max_loss_idx = np.argmax(-np.imag(complex_epsilon))
+        f_max = f_ghz[max_loss_idx]
+        params['tau_0'] = 1 / (2 * np.pi * f_max * 1e9)
+    else:
+        # Multiple poles - distribute evenly in log space
+        f_min = f_ghz[0] if len(f_ghz) > 0 else 0.1
+        f_max = f_ghz[-1] if len(f_ghz) > 0 else 100.0
+
+        # Logarithmically spaced relaxation times
+        log_f_min = np.log10(f_min)
+        log_f_max = np.log10(f_max)
+        log_f_poles = np.linspace(log_f_min, log_f_max, n_poles)
+        f_poles = 10**log_f_poles
+
+        for i in range(n_poles):
+            params[f'delta_eps_{i}'] = total_delta_eps / n_poles
+            params[f'tau_{i}'] = 1 / (2 * np.pi * f_poles[i] * 1e9)
+
+    return params
+
+def calculate_model_from_params(params_dict):
+    """Calculate Multi-Pole Debye model from parameters dictionary."""
     global global_f_ghz
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-    
+
     f_ghz = global_f_ghz
     omega = 2 * np.pi * f_ghz * 1e9
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        if omega2 <= 0 or omega1 <= 0 or omega2 <= omega1:
-            eps_prime = np.full_like(f_ghz, np.nan)
-            eps_double_prime = np.full_like(f_ghz, np.nan)
-        else:
-            log_term = np.log((omega2**2 + omega**2) / (omega1**2 + omega**2))
-            eps_prime = eps_inf + (delta_eps / (2 * np.log(omega2 / omega1))) * log_term
-            atan_term = np.arctan(omega / omega1) - np.arctan(omega / omega2)
-            eps_double_prime = -(delta_eps / np.log(omega2 / omega1)) * atan_term
-    
+
+    eps_inf = params_dict.get('eps_inf', 1.0)
+    n_poles = params_dict.get('n_poles', 1)
+
+    # Start with epsilon infinity
+    complex_eps = np.full_like(f_ghz, eps_inf, dtype=complex)
+
+    # Add each Debye pole
+    for i in range(n_poles):
+        delta_eps = params_dict.get(f'delta_eps_{i}', 0)
+        tau = params_dict.get(f'tau_{i}', 1e-12)
+
+        # Debye relaxation: Δε / (1 + jωτ)
+        denominator = 1 + 1j * omega * tau
+        complex_eps += delta_eps / denominator
+
+    eps_prime = np.real(complex_eps)
+    eps_double_prime = -np.imag(complex_eps)
+
     return json.dumps({
         "eps_prime": eps_prime.tolist(),
         "eps_double_prime": eps_double_prime.tolist()
     })
 
-def calculate_model(params, f_ghz):
-    p = params
+def calculate_model(params_dict, f_ghz):
+    """Calculate Multi-Pole Debye model for given parameters and frequencies."""
     omega = 2 * np.pi * f_ghz * 1e9
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        if p['omega2'] <= 0 or p['omega1'] <= 0 or p['omega2'] <= p['omega1']:
-            eps_prime = np.full_like(f_ghz, np.nan)
-            eps_double_prime = np.full_like(f_ghz, np.nan)
-        else:
-            log_term = np.log((p['omega2']**2 + omega**2) / (p['omega1']**2 + omega**2))
-            eps_prime = p['eps_inf'] + (p['delta_eps'] / (2 * np.log(p['omega2'] / p['omega1']))) * log_term
-            atan_term = np.arctan(omega / p['omega1']) - np.arctan(omega / p['omega2'])
-            eps_double_prime = -(p['delta_eps'] / np.log(p['omega2'] / p['omega1'])) * atan_term
-    
-    return eps_prime + 1j * eps_double_prime
 
-def residual(params, f_ghz, complex_epsilon_data):
+    eps_inf = params_dict.get('eps_inf', 1.0)
+    n_poles = params_dict.get('n_poles', 1)
+
+    # Start with epsilon infinity
+    complex_eps = np.full_like(f_ghz, eps_inf, dtype=complex)
+
+    # Add each Debye pole
+    for i in range(n_poles):
+        delta_eps = params_dict.get(f'delta_eps_{i}', 0)
+        tau = params_dict.get(f'tau_{i}', 1e-12)
+
+        # Debye relaxation: Δε / (1 + jωτ)
+        denominator = 1 + 1j * omega * tau
+        complex_eps += delta_eps / denominator
+
+    return complex_eps
+
+def residual(params, f_ghz, complex_epsilon_data, n_poles):
+    """Residual function for Multi-Pole Debye model."""
     p_dict = params.valuesdict()
+    p_dict['n_poles'] = n_poles
     model_epsilon = calculate_model(p_dict, f_ghz)
-    
-    # Dynamic‑range scaling factors
+
+    # Dynamic range scaling factors
     scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
     scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
-    
+
     real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data)) / scale_real
     imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data)) / scale_imag
-    
+
     return np.concatenate([real_residual, imag_residual])
 
-def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
-    """Calculate Jacobian matrix using finite differences with relative step sizes"""
-    param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
+def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-12):
+    """Calculate Jacobian matrix using finite differences with proper scaling."""
+    param_names = ['eps_inf']
+    for i in range(n_poles):
+        param_names.extend([f'delta_eps_{i}', f'tau_{i}'])
+
     n_params = len(param_names)
     n_data = len(f_ghz) * 2  # real and imag parts
-    
+
     jacobian = np.zeros((n_data, n_params))
-    
+
     # Base model
+    params_dict['n_poles'] = n_poles
     base_model = calculate_model(params_dict, f_ghz)
-    base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
-    
+
+    # Apply the same scaling as in residual function
+    scale_real = np.max(np.abs(np.real(base_model))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(base_model))) or 1.0
+
+    base_residual = np.concatenate([
+        np.real(base_model) / scale_real,
+        np.imag(base_model) / scale_imag
+    ])
+
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
-        # Use relative step: Δp = rel · |p| + abs_min
-        step = rel_step * abs(params_dict[param_name]) + abs_step
-        params_plus = params_dict.copy()
-        params_plus[param_name] += step
-        
-        model_plus = calculate_model(params_plus, f_ghz)
-        residual_plus = np.concatenate([np.real(model_plus), np.imag(model_plus)])
-        
-        jacobian[:, i] = (residual_plus - base_residual) / step
-    
+        if param_name in params_dict:
+            # Use relative step
+            step = rel_step * abs(params_dict[param_name]) + abs_step
+            params_plus = params_dict.copy()
+            params_plus[param_name] += step
+
+            model_plus = calculate_model(params_plus, f_ghz)
+            residual_plus = np.concatenate([
+                np.real(model_plus) / scale_real,
+                np.imag(model_plus) / scale_imag
+            ])
+
+            jacobian[:, i] = (residual_plus - base_residual) / step
+
     return jacobian
 
-def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
-    """Calculate correlation matrix from Jacobian"""
+def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data, n_poles):
+    """Calculate correlation matrix from Jacobian."""
     try:
         # Calculate Jacobian
-        J = calculate_jacobian(params_dict, f_ghz)
-        
+        J = calculate_jacobian(params_dict, f_ghz, n_poles)
+
         # Calculate covariance matrix: (J^T J)^-1
         JTJ = np.dot(J.T, J)
-        
+
         # Add small regularization to ensure positive definite
         JTJ += np.eye(JTJ.shape[0]) * 1e-10
-        
+
         # Calculate covariance
         cov_matrix = np.linalg.inv(JTJ)
-        
+
         # Convert to correlation matrix
         std_devs = np.sqrt(np.diag(cov_matrix))
         corr_matrix = np.zeros_like(cov_matrix)
-        
+
         for i in range(len(std_devs)):
             for j in range(len(std_devs)):
                 if std_devs[i] > 0 and std_devs[j] > 0:
                     corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
                 else:
                     corr_matrix[i, j] = 0
-        
+
         return corr_matrix
     except:
         return None
 
-def format_correlation_matrix(corr_matrix):
-    """Format correlation matrix for display"""
+def format_correlation_matrix(corr_matrix, n_poles):
+    """Format correlation matrix for display."""
     if corr_matrix is None:
         return "Unable to calculate correlation matrix"
-    
-    param_names = ['eps_inf', 'delta_eps', 'omega1', 'omega2']
+
+    param_names = ['eps_inf']
+    for i in range(n_poles):
+        param_names.extend([f'delta_eps_{i}', f'tau_{i}'])
+
     result = "Correlations:\\n"
-    
-    for i, param1 in enumerate(param_names):
-        for j, param2 in enumerate(param_names):
-            if j > i:  # Only show upper triangle
-                correlation = corr_matrix[i, j]
-                if abs(correlation) > 0.1:  # Only show significant correlations
-                    result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
-    
+
+    try:
+        for i, param1 in enumerate(param_names):
+            for j, param2 in enumerate(param_names):
+                if j > i:  # Only show upper triangle
+                    if i < len(corr_matrix) and j < len(corr_matrix[0]):
+                        correlation = corr_matrix[i, j]
+                        if abs(correlation) > 0.1:  # Only show significant correlations
+                            result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
+    except (IndexError, TypeError) as e:
+        result += f"    Error accessing correlation matrix: {e}\\n"
+
     return result
 
-def create_updated_report(eps_inf, delta_eps, omega1, omega2):
-    global global_f_ghz, global_complex_epsilon
+def create_updated_report(params_dict):
+    """Create an updated report with current parameters."""
+    global global_f_ghz, global_complex_epsilon, global_n_poles
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
 
-    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
-    model_epsilon = calculate_model(params, global_f_ghz)
-    
+    n_poles = params_dict.get('n_poles', global_n_poles or 1)
+    params_dict['n_poles'] = n_poles
+    model_epsilon = calculate_model(params_dict, global_f_ghz)
+
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
+
+    # Apply the same scaling as in residual function for consistent RSS
+    scale_real = np.max(np.abs(np.real(global_complex_epsilon))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0
+
+    scaled_real_residuals = real_residuals / scale_real
+    scaled_imag_residuals = imag_residuals / scale_imag
+
     n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 4
-    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
-    rss = chi_sqr                                # same symbol, more explicit
+    n_var = 1 + 2 * n_poles  # eps_inf + (delta_eps, tau) for each pole
+    chi_sqr = np.sum(scaled_real_residuals**2) + np.sum(scaled_imag_residuals**2)
+    rss = chi_sqr
     red_chi_sqr = rss / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-    
-    # Information criteria
+
+    # Information criteria using scaled RSS
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
 
     # Calculate correlation matrix for current parameters
-    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
-    corr_text = format_correlation_matrix(corr_matrix)
+    corr_matrix = calculate_correlation_matrix(params_dict, global_f_ghz, global_complex_epsilon, n_poles)
+    corr_text = format_correlation_matrix(corr_matrix, n_poles)
 
     # Create JSON data structure
     json_data = {
-        "model": "Djordjevic-Sarkar",
+        "model": "Multi-Pole Debye",
         "timestamp": datetime.now().isoformat(),
-        "parameters": {
-            "eps_inf": eps_inf,
-            "delta_eps": delta_eps,
-            "omega1": omega1,
-            "omega2": omega2,
-            "f1_ghz": omega1 / (2 * np.pi * 1e9),
-            "f2_ghz": omega2 / (2 * np.pi * 1e9)
-        },
+        "parameters": params_dict,
         "fit_statistics": {
             "n_data_points": n_dat,
             "n_variables": n_var,
@@ -766,20 +1005,31 @@ def create_updated_report(eps_inf, delta_eps, omega1, omega2):
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
 
-    report = f"""Djordjevic-Sarkar Fit Report
+    # Format poles information
+    poles_info = ""
+    for i in range(n_poles):
+        delta_eps = params_dict.get(f'delta_eps_{i}', 0)
+        tau = params_dict.get(f'tau_{i}', 0)
+        f_relax = 1 / (2 * np.pi * tau) / 1e9 if tau > 0 else 0
+        poles_info += f"    Pole {i+1}:\\n"
+        poles_info += f"        Δε_{i} = {delta_eps:.4f}\\n"
+        poles_info += f"        τ_{i}  = {tau:.4e} s\\n"
+        poles_info += f"        f_relax = {f_relax:.4f} GHz\\n"
+
+    report = f"""Multi-Pole Debye Fit Report
 {'=' * 50}
 Date: {datetime.now()}
 
 Model and Parameters
 --------------------------------------------------
-ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
-ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
+ε*(ω) = ε_∞ + Σ[Δε_i / (1 + jωτ_i)]
+
+Number of poles: {n_poles}
 
 Using current values (manual):
-    eps_inf   = {eps_inf:.4f}
-    delta_eps = {delta_eps:.4f}
-    omega1    = {omega1:.4e}
-    omega2    = {omega2:.4e}
+    eps_inf = {params_dict.get('eps_inf', 0):.4f}
+
+{poles_info}
 
 Fit Statistics
     # data points = {n_dat}
@@ -803,7 +1053,6 @@ Residual Analysis
 """
     return json.dumps({"report": report, "json_data": json_data})
 
-
 def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
     fig = make_subplots(rows=2, cols=1, subplot_titles=('Real Permittivity', 'Loss Tangent'))
     fig.add_trace(go.Scatter(x=f_ghz, y=np.real(measured_eps), mode='markers', name='Measured Dk', marker=dict(color='black')), row=1, col=1)
@@ -819,47 +1068,32 @@ def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
     fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), template="plotly_white", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99))
     return pio.to_json(fig)
 
-def get_measured_data():
-    """Return the stored measured data"""
-    global global_measured_dk, global_measured_df
-    return json.dumps({
-        "measured_dk": global_measured_dk if global_measured_dk is not None else [],
-        "measured_df": global_measured_df if global_measured_df is not None else []
-    })
-
-def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
+def evaluate_current_fit(params_dict):
     """Evaluate the current fit quality and return evaluation results."""
-    global global_f_ghz, global_complex_epsilon
+    global global_f_ghz, global_complex_epsilon, global_n_poles
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-    
-    # Get current report data
-    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
-    model_epsilon = calculate_model(params, global_f_ghz)
-    
+
+    n_poles = params_dict.get('n_poles', global_n_poles or 1)
+    params_dict['n_poles'] = n_poles
+    model_epsilon = calculate_model(params_dict, global_f_ghz)
+
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
+
     n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 4
+    n_var = 1 + 2 * n_poles
     chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-    
+
     # Calculate correlation matrix
-    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
-    
+    corr_matrix = calculate_correlation_matrix(params_dict, global_f_ghz, global_complex_epsilon, n_poles)
+
     # Create JSON report format
     json_report = {
-        "model": "Djordjevic-Sarkar",
+        "model": "Multi-Pole Debye",
         "timestamp": datetime.now().isoformat(),
-        "parameters": {
-            "eps_inf": eps_inf,
-            "delta_eps": delta_eps,
-            "omega1": omega1,
-            "omega2": omega2,
-            "f1_ghz": omega1 / (2 * np.pi * 1e9),
-            "f2_ghz": omega2 / (2 * np.pi * 1e9)
-        },
+        "parameters": params_dict,
         "fit_statistics": {
             "n_data_points": n_dat,
             "n_variables": n_var,
@@ -880,7 +1114,7 @@ def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
         },
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
-    
+
     # Evaluate the fit
     try:
         evaluator = FitEvaluator()
@@ -890,19 +1124,20 @@ def evaluate_current_fit(eps_inf, delta_eps, omega1, omega2):
     except Exception as e:
         logger.warning(f"Could not evaluate fit: {e}")
         json_report['evaluation'] = None
-    
+
     return json.dumps(json_report)
 
-def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
-    global global_f_ghz, global_complex_epsilon
+def create_downloadable_plot(params_dict):
+    global global_f_ghz, global_complex_epsilon, global_n_poles
     if global_f_ghz is None:
         return None
 
-    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'omega1': omega1, 'omega2': omega2}
-    fitted_epsilon = calculate_model(params, global_f_ghz)
-    
+    n_poles = params_dict.get('n_poles', global_n_poles or 1)
+    params_dict['n_poles'] = n_poles
+    fitted_epsilon = calculate_model(params_dict, global_f_ghz)
+
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-    
+
     ax1.plot(global_f_ghz, np.real(global_complex_epsilon), 'ko', label='Measured')
     ax1.plot(global_f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
     ax1.set_xlabel('Frequency (GHz)')
@@ -922,56 +1157,84 @@ def create_downloadable_plot(eps_inf, delta_eps, omega1, omega2):
     ax2.grid(True, alpha=0.5)
 
     plt.tight_layout()
-    
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=150)
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
 
-def run_analysis(csv_content, method):
-    global global_f_ghz, global_complex_epsilon, global_correlation_matrix, global_measured_dk, global_measured_df
+def run_analysis(csv_content, n_poles_input, method):
+    global global_f_ghz, global_complex_epsilon, global_correlation_matrix
+    global global_measured_dk, global_measured_df, global_n_poles
+
     f_ghz, complex_epsilon_data = load_data(csv_content)
-    
+
     # Store measured data globally
     global_measured_dk = np.real(complex_epsilon_data).tolist()
     global_measured_df = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
-    
-    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data)
+
+    # Determine number of poles
+    detection_method_used = None
+    if n_poles_input == 'auto':
+        n_poles, detection_method_used = detect_number_of_poles(f_ghz, complex_epsilon_data)
+        print(f"Auto-detected {n_poles} pole(s) using {detection_method_used} method")
+    else:
+        n_poles = int(n_poles_input)
+        detection_method_used = "manual"
+
+    global_n_poles = n_poles
+
+    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_poles)
     params = Parameters()
+
+    # Add epsilon infinity
     dk_data = np.real(complex_epsilon_data)
     params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
-    params.add('delta_eps', value=initial_params['delta_eps'], min=-10, max=10)
-    omega1_min_rad = 2 * np.pi * 0.1e9
-    omega2_max_rad = 2 * np.pi * 1500e9
-    
-    # Characteristic frequency 1 (free)
-    params.add('omega1', value=initial_params['omega1'], min=omega1_min_rad, max=omega2_max_rad)
-    
-    # Logarithmic ratio r = ln(ω₂/ω₁) – must stay positive
-    params.add('log_omega_ratio',
-               value=np.log(initial_params['omega2']/initial_params['omega1']),
-               min=0.1,    # ω₂ ≳ 1.1 × ω₁
-               max=5.0)    # ω₂ ≤ e⁵ ≈ 150× ω₁
-    
-    # ω₂ is now defined from ω₁ and r; no independent stepping into invalid region
-    params.add('omega2', expr='omega1 * exp(log_omega_ratio)')
-    
-    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data))
+
+    # Add poles
+    for i in range(n_poles):
+        # Relaxation strength (allow negative for anomalous dispersion)
+        params.add(f'delta_eps_{i}',
+                  value=initial_params[f'delta_eps_{i}'],
+                  min=-10,
+                  max=dk_data.max() - 1.0)
+
+        # Relaxation time
+        params.add(f'tau_{i}',
+                  value=initial_params[f'tau_{i}'],
+                  min=1e-15,
+                  max=1e-6)
+
+    # Add constraints to order relaxation times (tau_0 < tau_1 < tau_2 ...)
+    for i in range(1, n_poles):
+        params.add(f'tau_ratio_{i}', value=2.0, min=1.1, max=100)
+        params[f'tau_{i}'].expr = f'tau_{i-1} * tau_ratio_{i}'
+
+    minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_poles))
     result = minimizer.minimize(method=method)
-    
-    fit_params = {p: float(v.value) for p, v in result.params.items()}
-    
-    # Calculate AIC and BIC
+
+    fit_params = {p: float(v.value) for p, v in result.params.items() if not p.startswith('tau_ratio')}
+    fit_params['n_poles'] = n_poles
+
+    # Calculate AIC and BIC using properly scaled residuals
     fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
     real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
     imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon_data)
+
+    # Apply the same scaling as in residual function
+    scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
+
+    scaled_real_residuals = real_residuals / scale_real
+    scaled_imag_residuals = imag_residuals / scale_imag
+
     n_dat = len(real_residuals) + len(imag_residuals)
-    n_var = 4
-    rss = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    n_var = 1 + 2 * n_poles
+    rss = np.sum(scaled_real_residuals**2) + np.sum(scaled_imag_residuals**2)
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
-    
+
     # Extract correlation matrix from fit result
     correlations_str = ""
     if hasattr(result, 'var_names') and hasattr(result, 'covar') and result.covar is not None:
@@ -979,43 +1242,47 @@ def run_analysis(csv_content, method):
         correlations_str = "\\nCorrelations (from optimization):\\n"
         for i, name1 in enumerate(result.var_names):
             for j, name2 in enumerate(result.var_names):
-                if j > i:
-                    corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
-                    if abs(corr_val) > 0.1:
-                        correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
-    
+                if j > i and not ('tau_ratio' in name1 or 'tau_ratio' in name2):
+                    try:
+                        corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
+                        if abs(corr_val) > 0.1:
+                            correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
+                    except:
+                        pass
+
     # Generate standard LMFit table
     report_content = fit_report(result).replace('[[', '').replace(']]', '')
-    
-    # Append 95% confidence intervals where available
-    ci_lines = ["\\nParameter uncertainties (1σ):"]
-    for name, par in result.params.items():
-        if par.stderr is None:
-            ci_lines.append(f"    {name:12s}: uncertainty not estimated")
-        else:
-            ci_lines.append(f"    {name:12s}: ±{par.stderr:.4g}")
-    
-    report_content += "\\n" + "\\n".join(ci_lines)
-    
+
+    # Format poles information
+    poles_info = ""
+    for i in range(n_poles):
+        delta_eps = fit_params[f'delta_eps_{i}']
+        tau = fit_params[f'tau_{i}']
+        f_relax = 1 / (2 * np.pi * tau) / 1e9 if tau > 0 else 0
+        poles_info += f"    Pole {i+1}:\\n"
+        poles_info += f"        Δε_{i} = {delta_eps:.4f}\\n"
+        poles_info += f"        τ_{i}  = {tau:.4e} s\\n"
+        poles_info += f"        f_relax = {f_relax:.4f} GHz\\n"
+
     model_section = f"""Model and Parameters
 --------------------------------------------------
-ε'(ω) = ε_inf + (Δε / (2 * ln(ω₂/ω₁))) * ln((ω₂² + ω²) / (ω₁² + ω²))
-ε''(ω) = -(Δε / ln(ω₂/ω₁)) * (atan(ω/ω₁) - atan(ω/ω₂))
+ε*(ω) = ε_∞ + Σ[Δε_i / (1 + jωτ_i)]
+
+Number of poles: {n_poles}
 
 Using fitted values:
-    eps_inf   = {fit_params['eps_inf']:.4f}
-    delta_eps = {fit_params['delta_eps']:.4f}
-    omega1    = {fit_params['omega1']:.4e}
-    omega2    = {fit_params['omega2']:.4e}
+    eps_inf = {fit_params['eps_inf']:.4f}
+
+{poles_info}
 
 Information Criteria:
     AIC = {aic:.4f}
     BIC = {bic:.4f}
 """
-    
-    full_report = f"Djordjevic-Sarkar Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{report_content}"
+
+    full_report = f"Multi-Pole Debye Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{report_content}"
     plot_json = create_plotly_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
-    
+
     return_data = {
         "report": full_report,
         "plot_json": plot_json,
@@ -1023,7 +1290,9 @@ Information Criteria:
         "fitted_params": fit_params,
         "correlations": correlations_str,
         "measured_dk": global_measured_dk,
-        "measured_df": global_measured_df
+        "measured_df": global_measured_df,
+        "n_poles": n_poles,
+        "detection_method": detection_method_used
     }
     return json.dumps(return_data)
 `;
@@ -1035,7 +1304,7 @@ Information Criteria:
                     indexURL: "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"
                 });
                 setLoadingState(true, 'Loading Python Packages...');
-                await pyodide.loadPackage(['numpy', 'pandas', 'micropip', 'matplotlib']);
+                await pyodide.loadPackage(['numpy', 'pandas', 'micropip', 'matplotlib', 'scipy']);
                 const micropip = pyodide.pyimport('micropip');
                 setLoadingState(true, 'Installing lmfit & plotly...');
                 await micropip.install(['lmfit', 'plotly']);
@@ -1073,115 +1342,212 @@ Information Criteria:
             runButton.classList.toggle('btn-disabled', !isReady);
         }
 
-        function setupParameterControls(params) {
-            const twoPi = 2 * Math.PI;
-            const f1_ghz = params.omega1 / (twoPi * 1e9);
-            const f2_ghz = params.omega2 / (twoPi * 1e9);
+        function createPoleControls(nPoles, params) {
+            poleControlsContainer.innerHTML = '';
+            currentPoleControls = {};
 
-            const uiParams = {
-                eps_inf: params.eps_inf,
-                delta_eps: params.delta_eps,
-                omega1: f1_ghz,
-                omega2: f2_ghz
-            };
-            
-            const ranges = {
-                eps_inf: { min: 1, max: Math.max(uiParams.eps_inf * 2, 10), step: 0.01 },
-                delta_eps: { min: -10, max: 10, step: 0.01 },
-                omega1: { min: uiParams.omega1 / 10, max: uiParams.omega1 * 10, step: uiParams.omega1 / 100 },
-                omega2: { min: uiParams.omega1 * 1.1, max: uiParams.omega1 * 150, step: uiParams.omega1 / 100 },
-            };
+            for (let i = 0; i < nPoles; i++) {
+                const poleDiv = document.createElement('div');
+                poleDiv.className = 'pole-controls';
+                poleDiv.innerHTML = `
+                    <h4 class="text-sm font-semibold text-gray-700 mb-3">Pole ${i + 1}</h4>
+                    <div class="space-y-4">
+                        <div>
+                            <label for="delta_eps_${i}_slider" class="block text-xs font-medium text-gray-600">Δε<sub>${i}</sub></label>
+                            <input type="range" id="delta_eps_${i}_slider" class="mt-1">
+                            <input type="number" id="delta_eps_${i}_input" class="mt-1 w-full p-1 border border-gray-300 rounded-md text-sm">
+                        </div>
+                        <div>
+                            <label for="tau_${i}_slider" class="block text-xs font-medium text-gray-600">τ<sub>${i}</sub> (s)</label>
+                            <input type="range" id="tau_${i}_slider" class="mt-1" step="any">
+                            <input type="number" id="tau_${i}_input" class="mt-1 w-full p-1 border border-gray-300 rounded-md text-sm" step="any">
+                        </div>
+                    </div>
+                `;
+                poleControlsContainer.appendChild(poleDiv);
 
-            for (const key in uiParams) {
-                if (paramControls[key]) {
-                    const { slider, input } = paramControls[key];
-                    const range = ranges[key];
-                    
-                    slider.min = range.min;
-                    slider.max = range.max;
-                    slider.step = range.step;
-                    slider.value = uiParams[key];
-                    
-                    input.min = range.min;
-                    input.max = range.max;
-                    input.step = range.step;
-                    input.value = uiParams[key];
-                }
+                // Store references and set up controls
+                const deltaEpsSlider = document.getElementById(`delta_eps_${i}_slider`);
+                const deltaEpsInput = document.getElementById(`delta_eps_${i}_input`);
+                const tauSlider = document.getElementById(`tau_${i}_slider`);
+                const tauInput = document.getElementById(`tau_${i}_input`);
+
+                // Set up delta_eps controls (allow negative values)
+                const deltaEps = params[`delta_eps_${i}`] || 0.5;
+                const deltaEpsMin = Math.min(-5, deltaEps * 2);
+                const deltaEpsMax = Math.max(5, deltaEps * 2);
+                deltaEpsSlider.min = deltaEpsMin;
+                deltaEpsSlider.max = deltaEpsMax;
+                deltaEpsSlider.step = 0.01;
+                deltaEpsSlider.value = deltaEps;
+                deltaEpsInput.min = deltaEpsMin;
+                deltaEpsInput.max = deltaEpsMax;
+                deltaEpsInput.step = 0.01;
+                deltaEpsInput.value = deltaEps;
+
+                // Set up tau controls (log scale for slider)
+                const tau = params[`tau_${i}`] || 1e-9;
+                const logTauMin = -15;  // 10^-15 seconds
+                const logTauMax = -6;   // 10^-6 seconds
+                const logTau = Math.log10(tau);
+
+                tauSlider.min = logTauMin;
+                tauSlider.max = logTauMax;
+                tauSlider.step = 0.1;
+                tauSlider.value = logTau;
+
+                tauInput.min = 1e-15;
+                tauInput.max = 1e-6;
+                tauInput.step = 1e-15;
+                tauInput.value = tau;
+
+                // Store controls
+                currentPoleControls[`delta_eps_${i}`] = {
+                    slider: deltaEpsSlider,
+                    input: deltaEpsInput
+                };
+                currentPoleControls[`tau_${i}`] = {
+                    slider: tauSlider,
+                    input: tauInput,
+                    isLog: true
+                };
+
+                // Add event listeners
+                deltaEpsSlider.addEventListener('input', (e) => {
+                    deltaEpsInput.value = e.target.value;
+                    updateUIFromControls();
+                });
+
+                deltaEpsInput.addEventListener('input', (e) => {
+                    deltaEpsSlider.value = e.target.value;
+                    updateUIFromControls();
+                });
+
+                tauSlider.addEventListener('input', (e) => {
+                    const tau = Math.pow(10, parseFloat(e.target.value));
+                    tauInput.value = tau.toExponential(2);
+                    updateUIFromControls();
+                });
+
+                tauInput.addEventListener('input', (e) => {
+                    const tau = parseFloat(e.target.value);
+                    if (tau > 0) {
+                        tauSlider.value = Math.log10(tau);
+                        updateUIFromControls();
+                    }
+                });
             }
+        }
+
+        function setupParameterControls(params) {
+            const nPoles = params.n_poles || 1;
+            currentNPoles = nPoles;
+
+            // Set up epsilon infinity control
+            const epsInfSlider = document.getElementById('eps_inf_slider');
+            const epsInfInput = document.getElementById('eps_inf_input');
+
+            const epsInf = params.eps_inf || 1.0;
+            epsInfSlider.min = 1;
+            epsInfSlider.max = Math.max(epsInf * 2, 10);
+            epsInfSlider.step = 0.01;
+            epsInfSlider.value = epsInf;
+
+            epsInfInput.min = 1;
+            epsInfInput.max = Math.max(epsInf * 2, 10);
+            epsInfInput.step = 0.01;
+            epsInfInput.value = epsInf;
+
+            // Create pole controls
+            createPoleControls(nPoles, params);
+
+            // Add event listeners for epsilon infinity
+            epsInfSlider.addEventListener('input', (e) => {
+                epsInfInput.value = e.target.value;
+                updateUIFromControls();
+            });
+
+            epsInfInput.addEventListener('input', (e) => {
+                epsInfSlider.value = e.target.value;
+                updateUIFromControls();
+            });
         }
 
         async function updateUIFromControls() {
             if (!currentData || !pyodide) return;
-            
-            const eps_inf = parseFloat(paramControls.eps_inf.input.value);
-            const delta_eps = parseFloat(paramControls.delta_eps.input.value);
-            const f1_ghz = parseFloat(paramControls.omega1.input.value);
-            let f2_ghz = parseFloat(paramControls.omega2.input.value);
 
-            // Enforce omega2 > omega1 constraint
-            if (f2_ghz <= f1_ghz) {
-                f2_ghz = f1_ghz * 1.1; // Minimum 10% separation
-                paramControls.omega2.input.value = f2_ghz;
-                paramControls.omega2.slider.value = f2_ghz;
+            const params = {
+                eps_inf: parseFloat(document.getElementById('eps_inf_input').value),
+                n_poles: currentNPoles
+            };
+
+            // Collect pole parameters
+            for (let i = 0; i < currentNPoles; i++) {
+                params[`delta_eps_${i}`] = parseFloat(document.getElementById(`delta_eps_${i}_input`).value);
+                params[`tau_${i}`] = parseFloat(document.getElementById(`tau_${i}_input`).value);
             }
-
-            const twoPi = 2 * Math.PI;
-            const omega1 = f1_ghz * twoPi * 1e9;
-            const omega2 = f2_ghz * twoPi * 1e9;
 
             try {
                 // Update Plot
-                const calculateFunc = pyodide.globals.get('calculate_model_from_params');
-                const modelJson = calculateFunc(eps_inf, delta_eps, omega1, omega2);
+                const modelJson = await pyodide.runPythonAsync(`
+                    import json
+                    params_dict = ${JSON.stringify(params)}
+                    result = calculate_model_from_params(params_dict)
+                    result
+                `);
                 const modelResults = JSON.parse(modelJson);
-                
+
                 if (modelResults.error) return;
 
                 const fittedDk = modelResults.eps_prime;
-                const fittedDf = fittedDk.map((dk, i) => -modelResults.eps_double_prime[i] / dk);
+                const fittedDf = fittedDk.map((dk, i) => modelResults.eps_double_prime[i] / dk);
                 Plotly.restyle('plot-output', { y: [fittedDk, fittedDf] }, [1, 3]);
 
-                // Update Report with correlation matrix
-                const generateReportFunc = pyodide.globals.get('create_updated_report');
-                const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
+                // Update Report
+                const reportJson = await pyodide.runPythonAsync(`
+                    params_dict = ${JSON.stringify(params)}
+                    create_updated_report(params_dict)
+                `);
                 const reportData = JSON.parse(reportJson);
                 reportOutput.textContent = reportData.report;
-                
+
                 // Update fit quality indicator
-                const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
-                const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
+                const evaluationJson = await pyodide.runPythonAsync(`
+                    params_dict = ${JSON.stringify(params)}
+                    evaluate_current_fit(params_dict)
+                `);
                 const evaluationData = JSON.parse(evaluationJson);
-                
+
                 if (evaluationData.evaluation) {
                     updateFitQualityIndicator(evaluationData.evaluation);
                 }
-                
+
             } catch (err) {
                 console.error('Error updating UI:', err);
             }
         }
-        
+
         function updateFitQualityIndicator(evaluation) {
             const indicator = document.getElementById('fit-quality-indicator');
             const scoreSpan = document.getElementById('fit-quality-score');
             const bar = document.getElementById('fit-quality-bar');
             const warningsDiv = document.getElementById('fit-warnings');
             const warningsContainer = document.getElementById('warnings-container');
-            
+
             if (!evaluation) {
                 indicator.classList.add('hidden');
                 return;
             }
-            
+
             indicator.classList.remove('hidden');
             const score = evaluation.overall_score;
             const category = evaluation.overall_category;
-            
+
             scoreSpan.textContent = `${score} (${category})`;
-            
+
             // Update bar width and color
             bar.style.width = `${score}%`;
-            
+
             if (score >= 90) {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-green-500';
                 indicator.className = 'mb-4 p-3 rounded-lg bg-green-50 border border-green-200';
@@ -1195,16 +1561,16 @@ Information Criteria:
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-red-500';
                 indicator.className = 'mb-4 p-3 rounded-lg bg-red-50 border border-red-200';
             }
-            
-            // Display warnings as colored badges
+
+            // Display warnings
             if (evaluation.warnings && evaluation.warnings.length > 0) {
                 warningsDiv.classList.remove('hidden');
                 warningsContainer.innerHTML = '';
-                
+
                 evaluation.warnings.forEach(warning => {
                     const badge = document.createElement('div');
-                    badge.className = 'inline-block bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full border border-orange-200';
-                    badge.textContent = warning;
+                    badge.className = 'inline-block bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full border border-orange-200 mr-1 mb-1';
+                    badge.textContent = warning.length > 50 ? warning.substring(0, 50) + '...' : warning;
                     badge.title = warning; // Full text on hover
                     warningsContainer.appendChild(badge);
                 });
@@ -1212,26 +1578,27 @@ Information Criteria:
                 warningsDiv.classList.add('hidden');
             }
         }
-        
+
         function resetParameters() {
             if (!currentData || !currentData.fitted_params) return;
             setupParameterControls(currentData.fitted_params);
-            
+
             const plotData = JSON.parse(currentData.plot_json);
             Plotly.restyle('plot-output', {
                 y: [plotData.data[1].y, plotData.data[3].y]
             }, [1, 3]);
             reportOutput.textContent = currentData.report;
-            
+
             // Update fit quality for reset parameters
-            const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
-            const params = currentData.fitted_params;
-            const evaluationJson = evaluateFunc(params.eps_inf, params.delta_eps, params.omega1, params.omega2);
-            const evaluationData = JSON.parse(evaluationJson);
-            
-            if (evaluationData.evaluation) {
-                updateFitQualityIndicator(evaluationData.evaluation);
-            }
+            pyodide.runPythonAsync(`
+                params_dict = ${JSON.stringify(currentData.fitted_params)}
+                evaluate_current_fit(params_dict)
+            `).then(evaluationJson => {
+                const evaluationData = JSON.parse(evaluationJson);
+                if (evaluationData.evaluation) {
+                    updateFitQualityIndicator(evaluationData.evaluation);
+                }
+            });
         }
 
         async function downloadResults() {
@@ -1241,19 +1608,26 @@ Information Criteria:
                 const zip = new JSZip();
                 const baseFilename = originalFilename.replace(/\.csv$/i, '');
 
-                const eps_inf = parseFloat(paramControls.eps_inf.input.value);
-                const delta_eps = parseFloat(paramControls.delta_eps.input.value);
-                const f1_ghz = parseFloat(paramControls.omega1.input.value);
-                const f2_ghz = parseFloat(paramControls.omega2.input.value);
-                const twoPi = 2 * Math.PI;
-                const omega1 = f1_ghz * twoPi * 1e9;
-                const omega2 = f2_ghz * twoPi * 1e9;
+                // Collect current parameters
+                const params = {
+                    eps_inf: parseFloat(document.getElementById('eps_inf_input').value),
+                    n_poles: currentNPoles
+                };
 
-                // 1. Create Fitted Data CSV from current slider values
-                const calculateFunc = pyodide.globals.get('calculate_model_from_params');
-                const modelJson = calculateFunc(eps_inf, delta_eps, omega1, omega2);
+                for (let i = 0; i < currentNPoles; i++) {
+                    params[`delta_eps_${i}`] = parseFloat(document.getElementById(`delta_eps_${i}_input`).value);
+                    params[`tau_${i}`] = parseFloat(document.getElementById(`tau_${i}_input`).value);
+                }
+
+                // 1. Create Fitted Data CSV
+                const modelJson = await pyodide.runPythonAsync(`
+                    import json
+                    params_dict = ${JSON.stringify(params)}
+                    result = calculate_model_from_params(params_dict)
+                    result
+                `);
                 const modelResults = JSON.parse(modelJson);
-                
+
                 let csvContent = "Frequency_GHz,fitted_Dk,fitted_Df\n";
                 currentData.f_ghz.forEach((f, i) => {
                     const dk = modelResults.eps_prime[i];
@@ -1262,30 +1636,34 @@ Information Criteria:
                 });
                 zip.file(`${baseFilename}_fitted.csv`, csvContent);
 
-                // 2. Add Matplotlib Plot Image from current slider values
-                const createPlotFunc = pyodide.globals.get('create_downloadable_plot');
-                const imageProxy = createPlotFunc(eps_inf, delta_eps, omega1, omega2);
-                const imageData = imageProxy.toJs();
-                imageProxy.destroy();
-                zip.file(`${baseFilename}_plot.png`, imageData);
+                // 2. Add Matplotlib Plot Image
+                const imageBytes = await pyodide.runPythonAsync(`
+                    params_dict = ${JSON.stringify(params)}
+                    plot_bytes = create_downloadable_plot(params_dict)
+                    list(plot_bytes) if plot_bytes else []
+                `);
+                if (imageBytes && imageBytes.length > 0) {
+                    const imageData = new Uint8Array(imageBytes);
+                    zip.file(`${baseFilename}_plot.png`, imageData);
+                }
 
-                // 3. Add Report from current text content (human-readable .txt)
+                // 3. Add Report
                 zip.file(`${baseFilename}_report.txt`, reportOutput.textContent);
 
-                // 4. Generate JSON report for database ingestion
-                const generateReportFunc = pyodide.globals.get('create_updated_report');
-                const reportJson = generateReportFunc(eps_inf, delta_eps, omega1, omega2);
+                // 4. Generate JSON report
+                const reportJson = await pyodide.runPythonAsync(`
+                    params_dict = ${JSON.stringify(params)}
+                    create_updated_report(params_dict)
+                `);
                 const reportData = JSON.parse(reportJson);
-                
-                // Get evaluation for current parameters
-                const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
-                const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
+
+                // Get evaluation
+                const evaluationJson = await pyodide.runPythonAsync(`
+                    params_dict = ${JSON.stringify(params)}
+                    evaluate_current_fit(params_dict)
+                `);
                 const evaluationData = JSON.parse(evaluationJson);
-                
-                // Get measured data from currentData
-                let measuredDk = currentData.measured_dk || [];
-                let measuredDf = currentData.measured_df || [];
-                
+
                 // Add additional fields to JSON
                 const fullJsonReport = {
                     ...reportData.json_data,
@@ -1293,8 +1671,8 @@ Information Criteria:
                     data: {
                         frequency_ghz: currentData.f_ghz,
                         measured: {
-                            dk: measuredDk,
-                            df: measuredDf
+                            dk: currentData.measured_dk || [],
+                            df: currentData.measured_df || []
                         },
                         fitted: {
                             dk: modelResults.eps_prime,
@@ -1305,19 +1683,19 @@ Information Criteria:
                     },
                     evaluation: evaluationData.evaluation
                 };
-                
+
                 zip.file(`${baseFilename}_report.json`, JSON.stringify(fullJsonReport, null, 2));
-                
-                // 5. Add evaluation report as separate markdown file
+
+                // 5. Add evaluation report
                 if (evaluationData.evaluation && evaluationData.evaluation.markdown_table) {
                     zip.file(`${baseFilename}_evaluation.md`, evaluationData.evaluation.markdown_table);
                 }
 
-                // 5. Generate and Download Zip
+                // Generate and Download Zip
                 const content = await zip.generateAsync({ type: "blob" });
                 const link = document.createElement("a");
                 link.href = URL.createObjectURL(content);
-                link.download = `${baseFilename}_results.zip`;
+                link.download = `${baseFilename}_multipole_debye_results.zip`;
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
@@ -1330,41 +1708,6 @@ Information Criteria:
         }
 
         // Set up event listeners
-        let updateTimeout;
-        Object.entries(paramControls).forEach(([key, { slider, input }]) => {
-            slider.addEventListener('input', (e) => {
-                input.value = e.target.value;
-                // Additional constraint handling for omega controls
-                if (key === 'omega1') {
-                    const omega1_val = parseFloat(e.target.value);
-                    const omega2_val = parseFloat(paramControls.omega2.input.value);
-                    if (omega2_val <= omega1_val) {
-                        const newOmega2 = omega1_val * 1.1;
-                        paramControls.omega2.input.value = newOmega2;
-                        paramControls.omega2.slider.value = newOmega2;
-                    }
-                }
-                clearTimeout(updateTimeout);
-                updateTimeout = setTimeout(updateUIFromControls, 50);
-            });
-            
-            input.addEventListener('input', (e) => {
-                slider.value = e.target.value;
-                // Additional constraint handling for omega controls
-                if (key === 'omega1') {
-                    const omega1_val = parseFloat(e.target.value);
-                    const omega2_val = parseFloat(paramControls.omega2.input.value);
-                    if (omega2_val <= omega1_val) {
-                        const newOmega2 = omega1_val * 1.1;
-                        paramControls.omega2.input.value = newOmega2;
-                        paramControls.omega2.slider.value = newOmega2;
-                    }
-                }
-                clearTimeout(updateTimeout);
-                updateTimeout = setTimeout(updateUIFromControls, 50);
-            });
-        });
-
         fileUpload.addEventListener('change', (event) => {
             const file = event.target.files[0];
             if (file) {
@@ -1389,40 +1732,60 @@ Information Criteria:
             outputDiv.classList.add('hidden');
 
             try {
-                const runAnalysis = pyodide.globals.get('run_analysis');
                 const fitMethod = fitMethodSelect.value;
-                const resultJson = runAnalysis(fileContent, fitMethod);
-                const result = JSON.parse(resultJson);
-                
-                currentData = result;
-                originalCorrelations = result.correlations;
-                
-                const plotData = JSON.parse(result.plot_json);
-                plotOutput.innerHTML = '';
-                Plotly.newPlot('plot-output', plotData.data, plotData.layout, {responsive: true});
+                const nPoles = nPolesSelect.value;
 
-                // Store measured data in currentData from the result
-                currentData.measured_dk = result.measured_dk;
-                currentData.measured_df = result.measured_df;
+                // Pass the CSV content through a global variable to avoid escaping issues
+                await pyodide.runPythonAsync(`
+import json
+global_csv_content = ${JSON.stringify(fileContent)}
+result_json = run_analysis(global_csv_content, '${nPoles}', '${fitMethod}')
+result_json
+                `).then(async (resultJson) => {
+                    const result = JSON.parse(resultJson);
 
-                reportOutput.textContent = result.report;
-                setupParameterControls(result.fitted_params);
-                
-                // Show initial fit quality
-                const evaluateFunc = pyodide.globals.get('evaluate_current_fit');
-                const eps_inf = result.fitted_params.eps_inf;
-                const delta_eps = result.fitted_params.delta_eps;
-                const omega1 = result.fitted_params.omega1;
-                const omega2 = result.fitted_params.omega2;
-                
-                const evaluationJson = evaluateFunc(eps_inf, delta_eps, omega1, omega2);
-                const evaluationData = JSON.parse(evaluationJson);
-                
-                if (evaluationData.evaluation) {
-                    updateFitQualityIndicator(evaluationData.evaluation);
-                }
-                
-                outputDiv.classList.remove('hidden');
+                    currentData = result;
+
+                    const plotData = JSON.parse(result.plot_json);
+                    plotOutput.innerHTML = '';
+                    Plotly.newPlot('plot-output', plotData.data, plotData.layout, {responsive: true});
+
+                    currentData.measured_dk = result.measured_dk;
+                    currentData.measured_df = result.measured_df;
+
+                    reportOutput.textContent = result.report;
+                    setupParameterControls(result.fitted_params);
+
+                    // Show detection method if auto-detected
+                    if (result.detection_method && result.detection_method !== 'manual') {
+                        const methodNames = {
+                            'BIC': 'Bayesian Information Criterion',
+                            'second_derivative': 'Second Derivative of log(ε″)',
+                            'peak_finding': 'Peak Finding (improved)',
+                            'insufficient_data': 'Insufficient Data'
+                        };
+                        const methodName = methodNames[result.detection_method] || result.detection_method;
+                        
+                        // Add detection method info to status
+                        const infoDiv = document.createElement('div');
+                        infoDiv.className = 'mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm';
+                        infoDiv.innerHTML = `<strong>Auto-detection:</strong> ${result.n_poles} pole(s) detected using ${methodName}`;
+                        document.getElementById('controls-panel').insertBefore(infoDiv, document.getElementById('controls-panel').firstChild);
+                    }
+
+                    // Show initial fit quality
+                    const evaluationJson = await pyodide.runPythonAsync(`
+                        params_dict = ${JSON.stringify(result.fitted_params)}
+                        evaluate_current_fit(params_dict)
+                    `);
+                    const evaluationData = JSON.parse(evaluationJson);
+
+                    if (evaluationData.evaluation) {
+                        updateFitQualityIndicator(evaluationData.evaluation);
+                    }
+
+                    outputDiv.classList.remove('hidden');
+                });
 
             } catch (err) {
                 console.error(err);
@@ -1431,7 +1794,7 @@ Information Criteria:
                 setLoadingState(false);
             }
         });
-        
+
         resetButton.addEventListener('click', resetParameters);
         downloadButton.addEventListener('click', downloadResults);
 
