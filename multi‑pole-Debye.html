@@ -621,9 +621,14 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles,
     if seed is not None:
         np.random.seed(seed)
 
-    # Add epsilon infinity
+    # Add epsilon infinity with data-driven bounds
     dk_data = np.real(complex_epsilon)
-    params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
+    dk_tail = np.median(dk_data[-max(3, int(0.1*len(dk_data))):])  # last 10% of points
+    eps_inf_lower = max(0.95*dk_tail, 1.0)   # never below 95% of tail
+    params.add('eps_inf',
+               value=initial_params['eps_inf'],
+               min=eps_inf_lower,
+               max=dk_data.max())
 
     # Add poles
     for i in range(n_poles):
@@ -1558,9 +1563,14 @@ def run_analysis(csv_content, n_poles_input, method):
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_poles, random_seed=42)
     params = Parameters()
 
-    # Add epsilon infinity
+    # Add epsilon infinity with data-driven bounds
     dk_data = np.real(complex_epsilon_data)
-    params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
+    dk_tail = np.median(dk_data[-max(3, int(0.1*len(dk_data))):])  # last 10% of points
+    eps_inf_lower = max(0.95*dk_tail, 1.0)   # never below 95% of tail
+    params.add('eps_inf',
+               value=initial_params['eps_inf'],
+               min=eps_inf_lower,
+               max=dk_data.max())
 
     # Add poles
     for i in range(n_poles):
