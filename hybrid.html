@@ -207,17 +207,6 @@
         let paramControls = {};
         let originalParams = null;
 
-        // Default parameter bounds - centralized magic numbers
-        const DEFAULT_BOUNDS = {
-            eps_inf: { min: 0.5, max: null },  // max will be set to dk_data.max()
-            delta_eps_D: { min: 0, max: null },  // max will be set to dk_data.max()
-            tau_D: { min: 1e-15, max: 1e-6, logScale: true },
-            alpha: { min: 0.1, max: 1.0 },
-            delta_eps_L: { min: 0, max: null },  // max will be set to dk_data.max()
-            omega0: { min: null, max: null, logScale: true },  // min/max set from frequency range
-            gamma: { min: 1e7, max: null, logScale: true }  // max will be set to omega0
-        };
-
         // Python Script
         const pythonScript = `
 import sys
@@ -241,17 +230,6 @@ from dataclasses import dataclass, field
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Default parameter bounds - centralized magic numbers
-DEFAULT_BOUNDS = {
-    'eps_inf': {'min': 0.5, 'max': None},  # max will be set to dk_data.max()
-    'delta_eps_D': {'min': 0, 'max': None},  # max will be set to dk_data.max()
-    'tau_D': {'min': 1e-15, 'max': 1e-6},
-    'alpha': {'min': 0.1, 'max': 1.0},
-    'delta_eps_L': {'min': 0, 'max': None},  # max will be set to dk_data.max()
-    'omega0': {'min': None, 'max': None},  # min/max set from frequency range
-    'gamma': {'min': 1e7, 'max': None}  # max will be set to omega0
-}
 
 # Fit Evaluator Classes (same as in Sarkar model)
 @dataclass
@@ -539,27 +517,7 @@ def load_data(csv_content):
         raise ValueError(f"Failed to parse CSV: {e}")
 
 def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
-    """
-    Estimate initial parameter values for the Hybrid Debye-Lorentz model.
-
-    Uses logarithmic frequency spacing to decouple Debye and Lorentz mechanisms,
-    preventing overlap of characteristic frequencies during optimization.
-
-    Args:
-        f_ghz (ndarray): Frequency data in GHz
-        complex_epsilon (ndarray): Complex permittivity data
-        n_terms (int): Number of hybrid terms to fit
-
-    Returns:
-        dict: Initial parameter values with keys:
-            - 'eps_inf': High-frequency permittivity limit
-            - 'delta_eps_D{i}': Debye amplitude for term i
-            - 'tau_D{i}': Debye relaxation time for term i (seconds)
-            - 'alpha{i}': Cole-Cole parameter for term i
-            - 'delta_eps_L{i}': Lorentz amplitude for term i
-            - 'omega0{i}': Lorentz resonance frequency for term i (rad/s)
-            - 'gamma{i}': Lorentz damping parameter for term i (rad/s)
-    """
+    """Estimate initial parameters for hybrid model with n_terms"""
     dk = np.real(complex_epsilon)
     df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
 
@@ -601,29 +559,7 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
     return params
 
 def calculate_hybrid_model(params, f_ghz, n_terms):
-    """
-    Calculate complex permittivity using the Hybrid Debye-Lorentz model.
-
-    Implements the equation:
-    ε*(ω) = ε_∞ + Σ[i=1 to n] [Δε_D,i / (1 + (jωτ_D,i)^α_i) + Δε_L,i ω₀,i² / (ω₀,i² - ω² - j2γ_i ω)]
-
-    Each term combines independent Debye relaxation and Lorentz resonance mechanisms
-    with correct physical damping (2γω) and no fixed weighting factors.
-
-    Args:
-        params (dict): Model parameters (handles PyProxy conversion automatically)
-        f_ghz (ndarray): Frequency array in GHz
-        n_terms (int): Number of hybrid terms
-
-    Returns:
-        ndarray: Complex permittivity array ε*(ω) = ε' - jε''
-
-    Units:
-        - ω: Angular frequency (rad/s)
-        - τ_D: Relaxation time (s)
-        - ω₀: Resonance frequency (rad/s)
-        - γ: Damping parameter (rad/s)
-    """
+    """Calculate Hybrid Debye-Lorentz model response"""
     # Robust JsProxy to Python dict conversion
     if str(type(params)) == "<class 'pyodide.ffi.JsProxy'>":
         # Convert JsProxy to Python dict
@@ -680,26 +616,6 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
     return complex_epsilon
 
 def residual(params, f_ghz, complex_epsilon_data, n_terms):
-    """
-    Calculate weighted residuals for optimization.
-
-    Residuals are weighted by the standard deviation of real and imaginary
-    parts separately to achieve balanced fitting and meaningful χ² statistics.
-
-    Args:
-        params (Parameters): lmfit Parameters object
-        f_ghz (ndarray): Frequency data in GHz
-        complex_epsilon_data (ndarray): Measured complex permittivity
-        n_terms (int): Number of hybrid terms
-
-    Returns:
-        ndarray: Concatenated weighted residuals [real_weighted, imag_weighted]
-                Length = 2 * len(f_ghz)
-
-    Notes:
-        - Weighting ensures σ-normalized residuals for proper χ² distribution
-        - Real and imaginary parts weighted independently to handle different scales
-    """
     p_dict = params.valuesdict()
     model_epsilon = calculate_hybrid_model(p_dict, f_ghz, n_terms)
 
@@ -713,26 +629,7 @@ def residual(params, f_ghz, complex_epsilon_data, n_terms):
     return np.concatenate([real_residual / sigma_r, imag_residual / sigma_i])
 
 def calculate_jacobian(params_dict, f_ghz, n_terms):
-    """
-    Calculate Jacobian matrix using robust finite differences.
-
-    Uses machine-precision-aware step sizes to avoid numerical issues
-    with parameters near their bounds or having widely different scales.
-
-    Args:
-        params_dict (dict): Parameter values
-        f_ghz (ndarray): Frequency data in GHz
-        n_terms (int): Number of hybrid terms
-
-    Returns:
-        ndarray: Jacobian matrix J[i,j] = ∂residual[i]/∂param[j]
-                Shape: (2*n_freq, n_params) where n_params = 1 + 6*n_terms
-
-    Notes:
-        - Step size: h = √(machine_eps) * max(|param|, 1)
-        - Prevents underflow for small parameters
-        - Maintains accuracy for large parameters
-    """
+    """Calculate Jacobian matrix using finite differences with relative step"""
     param_names = ['eps_inf']
     for i in range(n_terms):
         param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'gamma{i+1}'])
@@ -763,27 +660,7 @@ def calculate_jacobian(params_dict, f_ghz, n_terms):
     return jacobian
 
 def calculate_correlation_matrix(params_dict, f_ghz, n_terms):
-    """
-    Calculate parameter correlation matrix using eigenvalue regularization.
-
-    Computes correlations from the covariance matrix derived from the Jacobian,
-    using robust eigenvalue clipping to handle ill-conditioned cases.
-
-    Args:
-        params_dict (dict): Parameter values
-        f_ghz (ndarray): Frequency data in GHz
-        n_terms (int): Number of hybrid terms
-
-    Returns:
-        ndarray or None: Correlation matrix R[i,j] = cov[i,j] / (σ[i] * σ[j])
-                        Shape: (n_params, n_params)
-                        Returns None if calculation fails
-
-    Notes:
-        - Uses eigenvalue clipping: λ_reg = max(λ, λ_max * 1e-8)
-        - Robust to parameter scaling differences
-        - Handles singular/near-singular matrices gracefully
-    """
+    """Calculate correlation matrix from Jacobian"""
     try:
         # Calculate Jacobian
         J = calculate_jacobian(params_dict, f_ghz, n_terms)
@@ -906,73 +783,24 @@ def create_downloadable_plot(fitted_params, n_terms):
     return buf.getvalue()
 
 def run_analysis(csv_content, n_terms, method):
-    """
-    Main analysis function for Hybrid Debye-Lorentz model fitting.
-
-    Performs complete dielectric fitting workflow: data loading, parameter
-    initialization, optimization, statistical analysis, and report generation.
-
-    Args:
-        csv_content (str): CSV data with columns [Frequency_GHz, Dk, Df]
-        n_terms (int): Number of hybrid terms (1-5 typically)
-        method (str): Optimization method ('least_squares', 'nelder', 'lbfgsb')
-
-    Returns:
-        str: JSON string containing:
-            - 'report': Human-readable text report
-            - 'plot_json': Plotly plot data
-            - 'fitted_params': Optimized parameter values
-            - 'json_data': Structured data with statistics and evaluation
-            - 'f_ghz': Frequency array
-            - 'measured_dk/df': Measured data arrays
-
-    Raises:
-        ValueError: If CSV parsing fails or optimization fails
-
-    Notes:
-        - Uses lmfit's properly weighted χ², AIC, BIC statistics
-        - Includes FitEvaluator quality assessment
-        - Parameter bounds set via DEFAULT_BOUNDS dictionary
-    """
     global global_f_ghz, global_complex_epsilon
     f_ghz, complex_epsilon_data = load_data(csv_content)
 
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_terms)
     params = Parameters()
 
-    # Add eps_inf using DEFAULT_BOUNDS
+    # Add eps_inf
     dk_data = np.real(complex_epsilon_data)
-    eps_inf_bounds = DEFAULT_BOUNDS['eps_inf']
-    params.add('eps_inf', value=initial_params['eps_inf'],
-               min=eps_inf_bounds['min'], max=dk_data.max())
+    params.add('eps_inf', value=initial_params['eps_inf'], min=0.5, max=dk_data.max())
 
-    # Add parameters for each term using DEFAULT_BOUNDS
+    # Add parameters for each term with new 6-parameter model
     for i in range(n_terms):
-        # Debye parameters
-        delta_D_bounds = DEFAULT_BOUNDS['delta_eps_D']
-        params.add(f'delta_eps_D{i+1}', value=initial_params[f'delta_eps_D{i+1}'],
-                   min=delta_D_bounds['min'], max=dk_data.max())
-
-        tau_D_bounds = DEFAULT_BOUNDS['tau_D']
-        params.add(f'tau_D{i+1}', value=initial_params[f'tau_D{i+1}'],
-                   min=tau_D_bounds['min'], max=tau_D_bounds['max'])
-
-        alpha_bounds = DEFAULT_BOUNDS['alpha']
-        params.add(f'alpha{i+1}', value=initial_params[f'alpha{i+1}'],
-                   min=alpha_bounds['min'], max=alpha_bounds['max'])
-
-        # Lorentz parameters
-        delta_L_bounds = DEFAULT_BOUNDS['delta_eps_L']
-        params.add(f'delta_eps_L{i+1}', value=initial_params[f'delta_eps_L{i+1}'],
-                   min=delta_L_bounds['min'], max=dk_data.max())
-
-        omega0_bounds = DEFAULT_BOUNDS['omega0']
-        params.add(f'omega0{i+1}', value=initial_params[f'omega0{i+1}'],
-                   min=2*np.pi*f_ghz.min()*1e9, max=2*np.pi*f_ghz.max()*1e9)
-
-        gamma_bounds = DEFAULT_BOUNDS['gamma']
-        params.add(f'gamma{i+1}', value=initial_params[f'gamma{i+1}'],
-                   min=gamma_bounds['min'], max=initial_params[f'omega0{i+1}'])
+        params.add(f'delta_eps_D{i+1}', value=initial_params[f'delta_eps_D{i+1}'], min=0, max=dk_data.max())
+        params.add(f'tau_D{i+1}', value=initial_params[f'tau_D{i+1}'], min=1e-15, max=1e-6)
+        params.add(f'alpha{i+1}', value=initial_params[f'alpha{i+1}'], min=0.1, max=1.0)
+        params.add(f'delta_eps_L{i+1}', value=initial_params[f'delta_eps_L{i+1}'], min=0, max=dk_data.max())
+        params.add(f'omega0{i+1}', value=initial_params[f'omega0{i+1}'], min=2*np.pi*f_ghz.min()*1e9, max=2*np.pi*f_ghz.max()*1e9)
+        params.add(f'gamma{i+1}', value=initial_params[f'gamma{i+1}'], min=1e7, max=initial_params[f'omega0{i+1}'])
 
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_terms))
     result = minimizer.minimize(method=method)
@@ -1145,22 +973,10 @@ Message: {result.message}
             if (!isLoading) updateButtonState();
         }
 
-        function showError(message, clearData = true) {
+        function showError(message) {
             errorMessage.textContent = message;
             errorBox.classList.remove('hidden');
             outputDiv.classList.add('hidden');
-
-            // Clear current data on fatal errors to prevent reuse of faulty data
-            if (clearData) {
-                currentData = null;
-                originalParams = null;
-                paramControls = {};
-                // Reset UI state
-                const fitQualityIndicator = document.getElementById('fit-quality-indicator');
-                if (fitQualityIndicator) {
-                    fitQualityIndicator.classList.add('hidden');
-                }
-            }
         }
 
         function hideError() {
@@ -1307,18 +1123,18 @@ Message: {result.message}
                 // tau_D parameter (logarithmic scale)
                 const tau_D_val = params[`tau_D${i+1}`];
                 const tau_D_range = {
-                    min: DEFAULT_BOUNDS.tau_D.min,
-                    max: DEFAULT_BOUNDS.tau_D.max,
-                    step: DEFAULT_BOUNDS.tau_D.min,
-                    logScale: DEFAULT_BOUNDS.tau_D.logScale
+                    min: 1e-15,
+                    max: 1e-6,
+                    step: 1e-15,
+                    logScale: true
                 };
                 setControlValues(`tau_D${i+1}`, tau_D_val, tau_D_range);
 
                 // alpha parameter
                 const alpha_val = params[`alpha${i+1}`];
                 const alpha_range = {
-                    min: DEFAULT_BOUNDS.alpha.min,
-                    max: DEFAULT_BOUNDS.alpha.max,
+                    min: 0.1,
+                    max: 1.0,
                     step: 0.01
                 };
                 setControlValues(`alpha${i+1}`, alpha_val, alpha_range);
@@ -1335,41 +1151,26 @@ Message: {result.message}
                 // omega0 parameter (logarithmic scale)
                 const omega0_val = params[`omega0${i+1}`];
                 const omega0_range = {
-                    min: 1e7,  // Will be set dynamically from frequency range
-                    max: 1e12, // Will be set dynamically from frequency range
+                    min: 1e7,
+                    max: 1e12,
                     step: 1e7,
-                    logScale: DEFAULT_BOUNDS.omega0.logScale
+                    logScale: true
                 };
                 setControlValues(`omega0${i+1}`, omega0_val, omega0_range);
 
                 // gamma parameter (logarithmic scale)
                 const gamma_val = params[`gamma${i+1}`];
                 const gamma_range = {
-                    min: DEFAULT_BOUNDS.gamma.min,
-                    max: 1e12,  // Will be set dynamically to omega0
+                    min: 1e7,
+                    max: 1e12,
                     step: 1e7,
-                    logScale: DEFAULT_BOUNDS.gamma.logScale
+                    logScale: true
                 };
                 setControlValues(`gamma${i+1}`, gamma_val, gamma_range);
             }
 
             // Add event listeners
             setupEventListeners(n_terms);
-        }
-
-        // Helper functions for log-scaling
-        function logSliderToValue(sliderValue, range) {
-            const logMin = Math.log10(range.min);
-            const logMax = Math.log10(range.max);
-            const logValue = logMin + (sliderValue / 100) * (logMax - logMin);
-            return Math.pow(10, logValue);
-        }
-
-        function valueToLogSlider(value, range) {
-            const logMin = Math.log10(range.min);
-            const logMax = Math.log10(range.max);
-            const logValue = Math.log10(value);
-            return ((logValue - logMin) / (logMax - logMin)) * 100;
         }
 
         function setControlValues(paramName, value, range) {
@@ -1379,10 +1180,14 @@ Message: {result.message}
             const { slider, input, rangeSpan } = control;
 
             if (range.logScale) {
-                // For logarithmic parameters
+                // For logarithmic parameters like tau
+                const logMin = Math.log10(range.min);
+                const logMax = Math.log10(range.max);
+                const logValue = Math.log10(value);
+
                 slider.min = 0;
                 slider.max = 100;
-                slider.value = valueToLogSlider(value, range);
+                slider.value = ((logValue - logMin) / (logMax - logMin)) * 100;
 
                 input.value = value.toExponential(2);
                 input.step = range.step;
@@ -1447,10 +1252,11 @@ Message: {result.message}
                 // tau_D parameter (logarithmic)
                 const tauDControl = paramControls[`tau_D${i+1}`];
                 if (tauDControl) {
-                    const tauDRange = { min: DEFAULT_BOUNDS.tau_D.min, max: DEFAULT_BOUNDS.tau_D.max };
-
                     tauDControl.slider.addEventListener('input', (e) => {
-                        const value = logSliderToValue(e.target.value, tauDRange);
+                        const logMin = Math.log10(1e-15);
+                        const logMax = Math.log10(1e-6);
+                        const logValue = logMin + (e.target.value / 100) * (logMax - logMin);
+                        const value = Math.pow(10, logValue);
                         tauDControl.input.value = value.toExponential(2);
                         clearTimeout(updateTimeout);
                         updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
@@ -1458,7 +1264,10 @@ Message: {result.message}
 
                     tauDControl.input.addEventListener('input', (e) => {
                         const value = parseFloat(e.target.value);
-                        tauDControl.slider.value = valueToLogSlider(value, tauDRange);
+                        const logMin = Math.log10(1e-15);
+                        const logMax = Math.log10(1e-6);
+                        const logValue = Math.log10(value);
+                        tauDControl.slider.value = ((logValue - logMin) / (logMax - logMin)) * 100;
                         clearTimeout(updateTimeout);
                         updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
                     });
@@ -1467,10 +1276,11 @@ Message: {result.message}
                 // omega0 parameter (logarithmic)
                 const omega0Control = paramControls[`omega0${i+1}`];
                 if (omega0Control) {
-                    const omega0Range = { min: 1e7, max: 1e12 };  // Dynamic range from frequency
-
                     omega0Control.slider.addEventListener('input', (e) => {
-                        const value = logSliderToValue(e.target.value, omega0Range);
+                        const logMin = Math.log10(1e7);
+                        const logMax = Math.log10(1e12);
+                        const logValue = logMin + (e.target.value / 100) * (logMax - logMin);
+                        const value = Math.pow(10, logValue);
                         omega0Control.input.value = value.toExponential(2);
                         clearTimeout(updateTimeout);
                         updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
@@ -1478,7 +1288,10 @@ Message: {result.message}
 
                     omega0Control.input.addEventListener('input', (e) => {
                         const value = parseFloat(e.target.value);
-                        omega0Control.slider.value = valueToLogSlider(value, omega0Range);
+                        const logMin = Math.log10(1e7);
+                        const logMax = Math.log10(1e12);
+                        const logValue = Math.log10(value);
+                        omega0Control.slider.value = ((logValue - logMin) / (logMax - logMin)) * 100;
                         clearTimeout(updateTimeout);
                         updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
                     });
@@ -1487,10 +1300,11 @@ Message: {result.message}
                 // gamma parameter (logarithmic)
                 const gammaControl = paramControls[`gamma${i+1}`];
                 if (gammaControl) {
-                    const gammaRange = { min: DEFAULT_BOUNDS.gamma.min, max: 1e12 };  // Dynamic max from omega0
-
                     gammaControl.slider.addEventListener('input', (e) => {
-                        const value = logSliderToValue(e.target.value, gammaRange);
+                        const logMin = Math.log10(1e7);
+                        const logMax = Math.log10(1e12);
+                        const logValue = logMin + (e.target.value / 100) * (logMax - logMin);
+                        const value = Math.pow(10, logValue);
                         gammaControl.input.value = value.toExponential(2);
                         clearTimeout(updateTimeout);
                         updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
@@ -1498,7 +1312,10 @@ Message: {result.message}
 
                     gammaControl.input.addEventListener('input', (e) => {
                         const value = parseFloat(e.target.value);
-                        gammaControl.slider.value = valueToLogSlider(value, gammaRange);
+                        const logMin = Math.log10(1e7);
+                        const logMax = Math.log10(1e12);
+                        const logValue = Math.log10(value);
+                        gammaControl.slider.value = ((logValue - logMin) / (logMax - logMin)) * 100;
                         clearTimeout(updateTimeout);
                         updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
                     });
@@ -1596,55 +1413,18 @@ Message: {result.message}
 
                 reportOutput.textContent = statsUpdate;
 
-                                // Update fit quality indicator using robust evaluation
-                // Use same thresholds as FitEvaluator but implement directly in JS for reliability
-                const rms_real = Math.sqrt(real_residuals.reduce((sum, r) => sum + r*r, 0) / real_residuals.length);
-                const rms_imag = Math.sqrt(imag_residuals.reduce((sum, r) => sum + r*r, 0) / imag_residuals.length);
-                const mean_real = Math.abs(real_residuals.reduce((sum, r) => sum + r, 0) / real_residuals.length);
-                const mean_imag = Math.abs(imag_residuals.reduce((sum, r) => sum + r, 0) / imag_residuals.length);
-                const mean_residual = Math.max(mean_real, mean_imag);
-
-                // Multi-metric evaluation using FitEvaluator thresholds
-                let totalScore = 0;
-                let totalWeight = 0;
-
-                // Reduced chi-square (weight: 3)
-                const chi_score = red_chi_sqr < 0.8 ? 100 :
-                                 red_chi_sqr < 1.2 ? 80 :
-                                 red_chi_sqr < 2.0 ? 60 : 30;
-                totalScore += chi_score * 3;
-                totalWeight += 3;
-
-                // RMS real (weight: 2)
-                const rms_real_score = rms_real < 0.005 ? 100 :
-                                      rms_real < 0.010 ? 80 :
-                                      rms_real < 0.020 ? 60 : 30;
-                totalScore += rms_real_score * 2;
-                totalWeight += 2;
-
-                // RMS imag (weight: 2)
-                const rms_imag_score = rms_imag < 0.001 ? 100 :
-                                      rms_imag < 0.002 ? 80 :
-                                      rms_imag < 0.005 ? 60 : 30;
-                totalScore += rms_imag_score * 2;
-                totalWeight += 2;
-
-                // Mean residual (weight: 1)
-                const mean_score = mean_residual < 1e-4 ? 100 :
-                                  mean_residual < 5e-4 ? 80 :
-                                  mean_residual < 1e-3 ? 60 : 30;
-                totalScore += mean_score * 1;
-                totalWeight += 1;
-
-                // Calculate overall score
-                const overall_score = Math.round(totalScore / totalWeight);
-                const overall_category = overall_score >= 90 ? "Godly" :
-                                        overall_score >= 75 ? "Excellent" :
-                                        overall_score >= 60 ? "Good" : "Poor";
+                // Update fit quality indicator
+                // Use same thresholds as FitEvaluator for consistency
+                const score = red_chi_sqr < 0.8 ? 100 :
+                             red_chi_sqr < 1.2 ? 80 :
+                             red_chi_sqr < 2.0 ? 60 : 30;
+                const category = score >= 90 ? "Godly" :
+                                score >= 75 ? "Excellent" :
+                                score >= 60 ? "Good" : "Poor";
 
                 updateFitQualityIndicator({
-                    overall_score: overall_score,
-                    overall_category: overall_category
+                    overall_score: score,
+                    overall_category: category
                 });
 
             } catch (err) {
@@ -1759,7 +1539,7 @@ Message: {result.message}
                 const imageData = imageProxy.toJs();
                 imageProxy.destroy();
                 imageProxy = null;
-                zip.file(`${baseFilename}_plot_hybrid_rev2.png`, imageData);
+                zip.file(`${baseFilename}_plot_hybrid.png`, imageData);
 
                 // 3. Add Report (human-readable .txt)
                 zip.file(`${baseFilename}_report_hybrid.txt`, reportOutput.textContent);
@@ -1767,9 +1547,6 @@ Message: {result.message}
                 // 4. Generate JSON report for database ingestion
                 const fullJsonReport = {
                     model: "Hybrid Debye-Lorentz",
-                    model_version: "rev2",
-                    model_revision: "2024.1",
-                    software_version: "QuickFitter v2.0",
                     n_terms: n_terms,
                     timestamp: new Date().toISOString(),
                     input_file: originalFilename,
