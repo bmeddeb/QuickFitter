@@ -544,14 +544,47 @@ global_correlation_matrix = None
 global_measured_dk = None
 global_measured_df = None
 global_n_poles = None
+global_scale_real = None
+global_scale_imag = None
+global_sigma_dk = None
+global_sigma_df = None
+global_weights_real = None
+global_weights_imag = None
 
 def load_data(csv_content):
-    global global_f_ghz, global_complex_epsilon
+    global global_f_ghz, global_complex_epsilon, global_sigma_dk, global_sigma_df
+    global global_weights_real, global_weights_imag
     try:
         data = pd.read_csv(io.StringIO(csv_content)).dropna()
         f_ghz = data.iloc[:, 0].values
         dk = data.iloc[:, 1].values
         df = data.iloc[:, 2].values
+        
+        # Check for uncertainty columns (columns 4 and 5)
+        if data.shape[1] >= 5:
+            # Uncertainties provided
+            sigma_dk = data.iloc[:, 3].values
+            sigma_df = data.iloc[:, 4].values
+            global_sigma_dk = sigma_dk
+            global_sigma_df = sigma_df
+            
+            # Calculate weights as 1/sigma^2 (variance weighting)
+            # Avoid division by zero
+            global_weights_real = np.where(sigma_dk > 0, 1.0 / sigma_dk**2, 1.0)
+            global_weights_imag = np.where(sigma_df > 0, 1.0 / (sigma_df * dk)**2, 1.0)
+        else:
+            # No uncertainties provided - use default weighting
+            global_sigma_dk = None
+            global_sigma_df = None
+            
+            # Weight imaginary part by 1/Dk^2 to balance relative errors
+            global_weights_real = np.ones_like(dk)
+            global_weights_imag = 1.0 / dk**2  # Weight by 1/Dk^2 for Df
+        
+        # Normalize weights to have mean = 1 for each component
+        global_weights_real = global_weights_real / np.mean(global_weights_real)
+        global_weights_imag = global_weights_imag / np.mean(global_weights_imag)
+        
         complex_epsilon = dk - 1j * (dk * df)
         global_f_ghz = f_ghz
         global_complex_epsilon = complex_epsilon
@@ -964,22 +997,40 @@ def calculate_model(params_dict, f_ghz):
     return complex_eps
 
 def residual(params, f_ghz, complex_epsilon_data, n_poles):
-    """Residual function for Multi-Pole Debye model."""
+    """Residual function for Multi-Pole Debye model with heteroscedastic weighting."""
+    global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
+    
     p_dict = params.valuesdict()
     p_dict['n_poles'] = n_poles
     model_epsilon = calculate_model(p_dict, f_ghz)
+    
+    # Calculate and store scaling factors on first call
+    if global_scale_real is None:
+        global_scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
+        global_scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
+    
+    # Calculate unweighted residuals
+    real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
+    imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
+    
+    # Apply scaling
+    real_residual_scaled = real_residual / global_scale_real
+    imag_residual_scaled = imag_residual / global_scale_imag
+    
+    # Apply weights if available
+    if global_weights_real is not None and global_weights_imag is not None:
+        real_residual_weighted = real_residual_scaled * np.sqrt(global_weights_real)
+        imag_residual_weighted = imag_residual_scaled * np.sqrt(global_weights_imag)
+    else:
+        real_residual_weighted = real_residual_scaled
+        imag_residual_weighted = imag_residual_scaled
 
-    # Dynamic range scaling factors
-    scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
-    scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
-
-    real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data)) / scale_real
-    imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data)) / scale_imag
-
-    return np.concatenate([real_residual, imag_residual])
+    return np.concatenate([real_residual_weighted, imag_residual_weighted])
 
 def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-12):
     """Calculate Jacobian matrix using finite differences with proper scaling."""
+    global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
+    
     param_names = ['eps_inf']
     for i in range(n_poles):
         param_names.extend([f'delta_eps_{i}', f'tau_{i}'])
@@ -993,14 +1044,19 @@ def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-1
     params_dict['n_poles'] = n_poles
     base_model = calculate_model(params_dict, f_ghz)
 
-    # Apply the same scaling as in residual function
-    scale_real = np.max(np.abs(np.real(base_model))) or 1.0
-    scale_imag = np.max(np.abs(np.imag(base_model))) or 1.0
+    # Use global scaling factors for consistency
+    scale_real = global_scale_real if global_scale_real is not None else (np.max(np.abs(np.real(base_model))) or 1.0)
+    scale_imag = global_scale_imag if global_scale_imag is not None else (np.max(np.abs(np.imag(base_model))) or 1.0)
 
-    base_residual = np.concatenate([
-        np.real(base_model) / scale_real,
-        np.imag(base_model) / scale_imag
-    ])
+    # Apply scaling and weights
+    real_base = np.real(base_model) / scale_real
+    imag_base = np.imag(base_model) / scale_imag
+    
+    if global_weights_real is not None and global_weights_imag is not None:
+        real_base *= np.sqrt(global_weights_real)
+        imag_base *= np.sqrt(global_weights_imag)
+    
+    base_residual = np.concatenate([real_base, imag_base])
 
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
@@ -1011,10 +1067,14 @@ def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-1
             params_plus[param_name] += step
 
             model_plus = calculate_model(params_plus, f_ghz)
-            residual_plus = np.concatenate([
-                np.real(model_plus) / scale_real,
-                np.imag(model_plus) / scale_imag
-            ])
+            real_plus = np.real(model_plus) / scale_real
+            imag_plus = np.imag(model_plus) / scale_imag
+            
+            if global_weights_real is not None and global_weights_imag is not None:
+                real_plus *= np.sqrt(global_weights_real)
+                imag_plus *= np.sqrt(global_weights_imag)
+            
+            residual_plus = np.concatenate([real_plus, imag_plus])
 
             jacobian[:, i] = (residual_plus - base_residual) / step
 
@@ -1077,6 +1137,8 @@ def format_correlation_matrix(corr_matrix, n_poles):
 def create_updated_report(params_dict):
     """Create an updated report with current parameters."""
     global global_f_ghz, global_complex_epsilon, global_n_poles
+    global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
+    
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
 
@@ -1087,20 +1149,28 @@ def create_updated_report(params_dict):
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
 
-    # Apply the same scaling as in residual function for consistent RSS
-    scale_real = np.max(np.abs(np.real(global_complex_epsilon))) or 1.0
-    scale_imag = np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0
+    # Use global scaling factors for consistency with optimization
+    scale_real = global_scale_real if global_scale_real is not None else (np.max(np.abs(np.real(global_complex_epsilon))) or 1.0)
+    scale_imag = global_scale_imag if global_scale_imag is not None else (np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0)
 
     scaled_real_residuals = real_residuals / scale_real
     scaled_imag_residuals = imag_residuals / scale_imag
+    
+    # Apply weights if available
+    if global_weights_real is not None and global_weights_imag is not None:
+        weighted_real_residuals = scaled_real_residuals * np.sqrt(global_weights_real)
+        weighted_imag_residuals = scaled_imag_residuals * np.sqrt(global_weights_imag)
+    else:
+        weighted_real_residuals = scaled_real_residuals
+        weighted_imag_residuals = scaled_imag_residuals
 
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 1 + 2 * n_poles  # eps_inf + (delta_eps, tau) for each pole
-    chi_sqr = np.sum(scaled_real_residuals**2) + np.sum(scaled_imag_residuals**2)
+    chi_sqr = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
     rss = chi_sqr
     red_chi_sqr = rss / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
 
-    # Information criteria using scaled RSS
+    # Information criteria using weighted RSS
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
 
@@ -1204,6 +1274,8 @@ def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
 def evaluate_current_fit(params_dict):
     """Evaluate the current fit quality and return evaluation results."""
     global global_f_ghz, global_complex_epsilon, global_n_poles
+    global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
+    
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
 
@@ -1213,10 +1285,25 @@ def evaluate_current_fit(params_dict):
 
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
+    
+    # Use global scaling factors for consistency
+    scale_real = global_scale_real if global_scale_real is not None else (np.max(np.abs(np.real(global_complex_epsilon))) or 1.0)
+    scale_imag = global_scale_imag if global_scale_imag is not None else (np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0)
+    
+    scaled_real_residuals = real_residuals / scale_real
+    scaled_imag_residuals = imag_residuals / scale_imag
+    
+    # Apply weights if available
+    if global_weights_real is not None and global_weights_imag is not None:
+        weighted_real_residuals = scaled_real_residuals * np.sqrt(global_weights_real)
+        weighted_imag_residuals = scaled_imag_residuals * np.sqrt(global_weights_imag)
+    else:
+        weighted_real_residuals = scaled_real_residuals
+        weighted_imag_residuals = scaled_imag_residuals
 
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 1 + 2 * n_poles
-    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    chi_sqr = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
     red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
 
     # Calculate correlation matrix
@@ -1300,6 +1387,11 @@ def create_downloadable_plot(params_dict):
 def run_analysis(csv_content, n_poles_input, method):
     global global_f_ghz, global_complex_epsilon, global_correlation_matrix
     global global_measured_dk, global_measured_df, global_n_poles
+    global global_scale_real, global_scale_imag
+    
+    # Reset scaling factors for new data
+    global_scale_real = None
+    global_scale_imag = None
 
     f_ghz, complex_epsilon_data = load_data(csv_content)
 
@@ -1350,21 +1442,29 @@ def run_analysis(csv_content, n_poles_input, method):
     fit_params = {p: float(v.value) for p, v in result.params.items() if not p.startswith('tau_ratio')}
     fit_params['n_poles'] = n_poles
 
-    # Calculate AIC and BIC using properly scaled residuals
+    # Calculate AIC and BIC using consistent scaling and weights
     fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
     real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
     imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon_data)
 
-    # Apply the same scaling as in residual function
-    scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
-    scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
+    # Use global scaling factors for consistency
+    scale_real = global_scale_real if global_scale_real is not None else (np.max(np.abs(np.real(complex_epsilon_data))) or 1.0)
+    scale_imag = global_scale_imag if global_scale_imag is not None else (np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0)
 
     scaled_real_residuals = real_residuals / scale_real
     scaled_imag_residuals = imag_residuals / scale_imag
+    
+    # Apply weights if available
+    if global_weights_real is not None and global_weights_imag is not None:
+        weighted_real_residuals = scaled_real_residuals * np.sqrt(global_weights_real)
+        weighted_imag_residuals = scaled_imag_residuals * np.sqrt(global_weights_imag)
+    else:
+        weighted_real_residuals = scaled_real_residuals
+        weighted_imag_residuals = scaled_imag_residuals
 
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 1 + 2 * n_poles
-    rss = np.sum(scaled_real_residuals**2) + np.sum(scaled_imag_residuals**2)
+    rss = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
 
