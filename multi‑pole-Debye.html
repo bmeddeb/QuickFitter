@@ -340,16 +340,21 @@ class FitEvaluator:
         self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
 
     def _dynamic_rms_thresholds(self, report):
-        """Generate data-dependent RMS thresholds based on median values."""
-        # 10% of median Dk and Df as "Good"
+        """Generate data-dependent RMS thresholds based on median and peak values."""
+        # Use median for real part
         med_dk = report.get('median_dk', 1)  # fallback
-        med_df = report.get('median_df', 0.01)
         good_rms_real = 0.10 * med_dk
-        good_rms_imag = 0.10 * med_df
+
+        # Use peak for imaginary part (more robust for high-loss samples)
+        peak_df = report.get('peak_df', 0.05)  # fallback
+        good_rms_imag = 0.03 * peak_df
+        excellent_rms_imag = 0.015 * peak_df
+        godly_rms_imag = 0.0075 * peak_df
+
         return {
             'rms_real': (0.02*med_dk, 0.05*med_dk, good_rms_real,
                          "Refine ε∞ or Δε_i."),
-            'rms_imag': (0.04*med_df, 0.08*med_df, good_rms_imag,
+            'rms_imag': (godly_rms_imag, excellent_rms_imag, good_rms_imag,
                          "Add pole or adjust τ_i.")
         }
 
@@ -392,6 +397,7 @@ class FitEvaluator:
             'n_poles': params.get('n_poles', 1),
             'median_dk': json_data.get('statistics', {}).get('median_dk', 1),
             'median_df': json_data.get('statistics', {}).get('median_df', 0.01),
+            'peak_df': json_data.get('statistics', {}).get('peak_df', 0.05),
         }
 
     def _validate_report(self, report: Dict[str, Any]) -> None:
@@ -602,9 +608,9 @@ def load_data(csv_content):
             global_sigma_dk = None
             global_sigma_df = None
 
-            # Weight imaginary part by 1/median(Dk)^2 to balance relative errors
+            # No experimental σ → give both channels equal influence
             global_weights_real = np.ones_like(dk)
-            global_weights_imag = 1.0 / (np.median(np.abs(dk))**2)  # Use median for stability
+            global_weights_imag = np.ones_like(dk)   # <<< change
 
         # Normalize weights to have mean = 1 for each component
         global_weights_real = global_weights_real / np.mean(global_weights_real)
@@ -630,18 +636,20 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles,
     # Add epsilon infinity with data-driven bounds
     dk_data = np.real(complex_epsilon)
     dk_tail = np.median(dk_data[-max(3, int(0.1*len(dk_data))):])  # last 10% of points
-    eps_inf_lower = max(0.95*dk_tail, 1.0)   # never below 95% of tail
+    eps_inf_lower = max(0.10*dk_tail, 1.0)
+    # Keep ε∞ below the static permittivity estimate to avoid un‑physical solutions
+    eps_inf_upper = np.median(dk_data[:max(3, int(0.1*len(dk_data)))])  # ≈ εs
     params.add('eps_inf',
                value=initial_params['eps_inf'],
                min=eps_inf_lower,
-               max=dk_data.max())
+               max=eps_inf_upper)
 
     # Add poles
     for i in range(n_poles):
         params.add(f'delta_eps_{i}',
                   value=initial_params.get(f'delta_eps_{i}', 0.5),
-                  min=0,  # Physical constraint
-                  max=max(dk_data.max() - 0.1, 0.5))  # Safe upper bound for low-ε materials
+                  min=-dk_data.max(),   # permit small negative correction if
+                  max= dk_data.max())   # ε∞ overshoots during optimisation
 
         # Use log-tau parameterization
         tau_i = initial_params.get(f'tau_{i}', 1e-9)
@@ -1305,10 +1313,11 @@ def create_updated_report(params_dict):
     corr_text = format_correlation_matrix(corr_matrix, n_poles, use_log_tau)
 
     # Compute statistics for dynamic thresholds
+    measured_df = -np.imag(global_complex_epsilon) / np.real(global_complex_epsilon)
     stats_block = {
         "median_dk": float(np.median(np.real(global_complex_epsilon))),
-        "median_df": float(np.median(-np.imag(global_complex_epsilon)
-                                     / np.real(global_complex_epsilon)))
+        "median_df": float(np.median(measured_df)),
+        "peak_df": float(np.max(measured_df))
     }
 
     # Create JSON data structure
@@ -1452,10 +1461,11 @@ def evaluate_current_fit(params_dict):
     corr_matrix = calculate_correlation_matrix(params_dict, global_f_ghz, global_complex_epsilon, n_poles)
 
     # Compute statistics for dynamic thresholds
+    measured_df = -np.imag(global_complex_epsilon) / np.real(global_complex_epsilon)
     stats_block = {
         "median_dk": float(np.median(np.real(global_complex_epsilon))),
-        "median_df": float(np.median(-np.imag(global_complex_epsilon)
-                                     / np.real(global_complex_epsilon)))
+        "median_df": float(np.median(measured_df)),
+        "peak_df": float(np.max(measured_df))
     }
 
     # Create JSON report format
@@ -1572,19 +1582,21 @@ def run_analysis(csv_content, n_poles_input, method):
     # Add epsilon infinity with data-driven bounds
     dk_data = np.real(complex_epsilon_data)
     dk_tail = np.median(dk_data[-max(3, int(0.1*len(dk_data))):])  # last 10% of points
-    eps_inf_lower = max(0.95*dk_tail, 1.0)   # never below 95% of tail
+    eps_inf_lower = max(0.10*dk_tail, 1.0)
+    # Keep ε∞ below the static permittivity estimate to avoid un‑physical solutions
+    eps_inf_upper = np.median(dk_data[:max(3, int(0.1*len(dk_data)))])  # ≈ εs
     params.add('eps_inf',
                value=initial_params['eps_inf'],
                min=eps_inf_lower,
-               max=dk_data.max())
+               max=eps_inf_upper)
 
     # Add poles
     for i in range(n_poles):
-        # Relaxation strength - enforce physical constraint (min=0)
+        # Relaxation strength - allow negative correction for ε∞ overshoot
         params.add(f'delta_eps_{i}',
                   value=initial_params[f'delta_eps_{i}'],
-                  min=0,  # Physical constraint: no negative permittivity steps
-                  max=max(dk_data.max() - 0.1, 0.5))  # Safe upper bound for low-ε materials
+                  min=-dk_data.max(),   # permit small negative correction if
+                  max= dk_data.max())   # ε∞ overshoots during optimisation
 
         # Use log-tau parameterization for better optimization
         tau_i = initial_params[f'tau_{i}']
@@ -1602,6 +1614,24 @@ def run_analysis(csv_content, n_poles_input, method):
 
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_poles))
     result = minimizer.minimize(method=method)
+
+    # --- NEW --------------------------------------------------
+    if result.covar is None:
+        try:
+            # result.params already holds the best values
+            def f(p):
+                # Create temporary params object with updated values
+                temp_params = result.params.copy()
+                for i, name in enumerate(result.var_names):
+                    temp_params[name].value = p[i]
+                return residual(temp_params, f_ghz, complex_epsilon_data, n_poles)
+
+            J = nd.Jacobian(f)(result.x)
+            cov = np.linalg.inv(J.T @ J)
+            result.covar = cov
+        except Exception as err:
+            logger.warning(f'Could not compute covariance via numdifftools: {err}')
+    # ----------------------------------------------------------
 
     # Extract fitted parameters, converting log_tau back to tau
     fit_params = {}
