@@ -247,6 +247,7 @@ import logging
 from typing import Dict, Tuple, Any, List, Optional
 from dataclasses import dataclass, field
 from scipy.signal import find_peaks
+import numdifftools as nd
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -312,8 +313,6 @@ class FitEvaluator:
     """Evaluates the quality of a fit report based on configurable metrics."""
     DEFAULT_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
         "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Consider adding more poles or adjusting relaxation times."),
-        "rms_real":           (0.005, 0.010, 0.020, "Refine initial ε_∞ or pole strengths Δε_i."),
-        "rms_imag":           (0.001, 0.002, 0.005, "Add extra pole or adjust time constants τ_i."),
         "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias, consider frequency-dependent effects."),
         "aic":                (2, 7, 14, "Consider reducing number of poles."),
         "bic":                (2, 7, 14, "Model complexity not justified by data."),
@@ -333,6 +332,20 @@ class FitEvaluator:
     def __init__(self, thresholds=None, weights=None):
         self.thresholds = thresholds or FitEvaluator.DEFAULT_THRESHOLDS
         self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
+
+    def _dynamic_rms_thresholds(self, report):
+        """Generate data-dependent RMS thresholds based on median values."""
+        # 10% of median Dk and Df as "Good"
+        med_dk = report.get('median_dk', 1)  # fallback
+        med_df = report.get('median_df', 0.01)
+        good_rms_real = 0.10 * med_dk
+        good_rms_imag = 0.10 * med_df
+        return {
+            'rms_real': (0.02*med_dk, 0.05*med_dk, good_rms_real,
+                         "Refine ε∞ or Δε_i."),
+            'rms_imag': (0.04*med_df, 0.08*med_df, good_rms_imag,
+                         "Add pole or adjust τ_i.")
+        }
 
     @classmethod
     def from_json_report(cls, json_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -370,7 +383,9 @@ class FitEvaluator:
             'correlations': correlations,
             'parameters': params,
             'eps_inf': params.get('eps_inf', 0),
-            'n_poles': params.get('n_poles', 1)
+            'n_poles': params.get('n_poles', 1),
+            'median_dk': json_data.get('statistics', {}).get('median_dk', 1),
+            'median_df': json_data.get('statistics', {}).get('median_df', 0.01),
         }
 
     def _validate_report(self, report: Dict[str, Any]) -> None:
@@ -483,6 +498,10 @@ class FitEvaluator:
         report_vals = dict(report)
         report_vals['mean_residual'] = mean_res
 
+        # Inject data-dependent thresholds
+        dyn = self._dynamic_rms_thresholds(report)
+        local_thresholds = {**self.thresholds, **dyn}
+
         # Data-points-per-variable
         dpv = report['n_data_points'] / report['n_variables']
         dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
@@ -492,7 +511,7 @@ class FitEvaluator:
             suggestions.append(dpv_sug)
 
         # Scalar metrics
-        for name, (g, e, gd, sug) in self.thresholds.items():
+        for name, (g, e, gd, sug) in local_thresholds.items():
             val = report_vals.get(name, 0)
             sc, cat = self._evaluate_scalar(val, (g, e, gd))
             sugg = sug if cat == "Poor" else None
@@ -1243,6 +1262,13 @@ def create_updated_report(params_dict):
     use_log_tau = any('log_tau_' in k for k in params_dict.keys())
     corr_text = format_correlation_matrix(corr_matrix, n_poles, use_log_tau)
 
+    # Compute statistics for dynamic thresholds
+    stats_block = {
+        "median_dk": float(np.median(np.real(global_complex_epsilon))),
+        "median_df": float(np.median(-np.imag(global_complex_epsilon)
+                                     / np.real(global_complex_epsilon)))
+    }
+
     # Create JSON data structure
     json_data = {
         "model": "Multi-Pole Debye",
@@ -1271,6 +1297,7 @@ def create_updated_report(params_dict):
                 "rms": float(np.sqrt(np.mean(imag_residuals**2)))
             }
         },
+        "statistics": stats_block,
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
 
@@ -1382,6 +1409,13 @@ def evaluate_current_fit(params_dict):
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(params_dict, global_f_ghz, global_complex_epsilon, n_poles)
 
+    # Compute statistics for dynamic thresholds
+    stats_block = {
+        "median_dk": float(np.median(np.real(global_complex_epsilon))),
+        "median_df": float(np.median(-np.imag(global_complex_epsilon)
+                                     / np.real(global_complex_epsilon)))
+    }
+
     # Create JSON report format
     json_report = {
         "model": "Multi-Pole Debye",
@@ -1410,6 +1444,7 @@ def evaluate_current_fit(params_dict):
                 "rms": float(np.sqrt(np.mean(imag_residuals**2)))
             }
         },
+        "statistics": stats_block,
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
 
@@ -1654,8 +1689,10 @@ Information Criteria:
                 setLoadingState(true, 'Loading Python Packages...');
                 await pyodide.loadPackage(['numpy', 'pandas', 'micropip', 'matplotlib', 'scipy']);
                 const micropip = pyodide.pyimport('micropip');
-                setLoadingState(true, 'Installing lmfit & plotly...');
-                await micropip.install(['lmfit==1.3.1', 'plotly']);
+                setLoadingState(true, 'Installing Python wheels...');
+                await micropip.install(['lmfit==1.3.1',          // pin for reproducibility
+                                       'numdifftools==0.9.41',   // parameter uncertainties
+                                       'plotly']);
                 isPyodideReady = true;
                 await pyodide.runPythonAsync(pythonScript);
                 setLoadingState(false);
