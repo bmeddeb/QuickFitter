@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Havriliak-Negami Model Fitter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .spinner {
+            border-top-color: #3498db;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .btn-disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+        /* Style for parameter sliders */
+        input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 8px;
+            background: #d1d5db;
+            border-radius: 5px;
+            outline: none;
+            opacity: 0.7;
+            transition: opacity .2s;
+        }
+        input[type=range]:hover {
+            opacity: 1;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #3b82f6;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        input[type=range]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: #3b82f6;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        .model-info {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Havriliak-Negami Model Fitter</h1>
+            <p class="mt-2 text-lg text-gray-600">Upload your dielectric spectroscopy data (CSV) to fit it to the Havriliak-Negami model.</p>
+            <div class="model-info mt-4 max-w-2xl mx-auto">
+                <p class="text-sm">ε*(ω) = ε<sub>∞</sub> + Δε / (1 + (jωτ)<sup>α</sup>)<sup>β</sup></p>
+                <p class="text-xs mt-2 opacity-90">where α (0 < α ≤ 1) describes symmetric broadening and β (0 < β ≤ 1) describes asymmetric broadening</p>
+            </div>
+        </header>
+
+        <div class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+            <!-- Controls Section -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-center mb-6">
+                <div>
+                    <label for="file-upload" class="block text-sm font-medium text-gray-700 mb-2">
+                        Upload CSV File
+                    </label>
+                    <div class="flex items-center space-x-4">
+                        <input type="file" id="file-upload" accept=".csv" class="block w-full text-sm text-gray-500
+                            file:mr-4 file:py-2 file:px-4
+                            file:rounded-lg file:border-0
+                            file:text-sm file:font-semibold
+                            file:bg-blue-50 file:text-blue-700
+                            hover:file:bg-blue-100
+                        ">
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Expected columns: Frequency (GHz), Dk, Df</p>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label for="fit-method" class="block text-sm font-medium text-gray-700">Optimization Method</label>
+                        <select id="fit-method" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                            <option value="least_squares" selected>least_squares (Default)</option>
+                            <option value="nelder">nelder</option>
+                            <option value="lbfgsb">lbfgsb</option>
+                            <option value="differential_evolution">differential_evolution (Global)</option>
+                        </select>
+                    </div>
+                    <button id="run-button" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
+                        Run Analysis
+                    </button>
+                </div>
+            </div>
+
+            <!-- Status and Output Section -->
+            <div id="status" class="text-center my-4 p-4 bg-gray-50 rounded-lg hidden">
+                <div class="flex items-center justify-center">
+                    <div class="spinner w-6 h-6 rounded-full border-4 border-gray-300"></div>
+                    <p id="status-message" class="ml-4 text-gray-700 font-medium"></p>
+                </div>
+            </div>
+
+            <div id="output" class="hidden mt-8">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <!-- Plot Display -->
+                    <div id="plot-container" class="lg:col-span-2 space-y-4">
+                        <div class="border border-gray-200 rounded-lg bg-gray-50 p-2">
+                            <div id="plot-output"></div>
+                        </div>
+                        <!-- Cole-Cole Plot -->
+                        <div class="border border-gray-200 rounded-lg bg-gray-50 p-2">
+                            <div id="cole-cole-plot" style="height: 400px;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Parameter Controls -->
+                    <div id="controls-panel" class="lg:col-span-1 bg-white p-6 rounded-lg border">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-xl font-bold text-gray-800">Adjust Fit Parameters</h3>
+                            <div class="flex space-x-2">
+                                <button id="reset-button" class="text-sm bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-1 px-3 rounded-lg">
+                                    Reset
+                                </button>
+                                <button id="download-button" class="text-sm bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1 px-3 rounded-lg">
+                                    Download
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Fit Quality Indicator -->
+                        <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm font-medium">Fit Quality:</span>
+                                <span id="fit-quality-score" class="text-lg font-bold"></span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                                <div id="fit-quality-bar" class="h-2 rounded-full transition-all duration-300"></div>
+                            </div>
+                            <!-- Warnings Display -->
+                            <div id="fit-warnings" class="mt-3 space-y-1 hidden">
+                                <div class="text-xs font-medium text-gray-600 mb-1">Warnings:</div>
+                                <div id="warnings-container" class="space-y-1"></div>
+                            </div>
+                        </div>
+
+                        <!-- Model Type Display -->
+                        <div id="model-type-indicator" class="mb-4 p-3 rounded-lg bg-indigo-50 border border-indigo-200 hidden">
+                            <div class="text-sm font-medium text-indigo-800">
+                                <span id="model-type-text"></span>
+                            </div>
+                        </div>
+
+                        <div class="space-y-6">
+                            <!-- eps_inf -->
+                            <div>
+                                <label for="eps_inf_slider" class="block text-sm font-medium text-gray-700">ε<sub>∞</sub> (Epsilon Infinity)</label>
+                                <input type="range" id="eps_inf_slider" class="mt-1">
+                                <input type="number" id="eps_inf_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <!-- delta_eps -->
+                            <div>
+                                <label for="delta_eps_slider" class="block text-sm font-medium text-gray-700">Δε (Delta Epsilon)</label>
+                                <input type="range" id="delta_eps_slider" class="mt-1">
+                                <input type="number" id="delta_eps_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <!-- tau -->
+                            <div>
+                                <label for="tau_slider" class="block text-sm font-medium text-gray-700">τ (Relaxation Time, s)</label>
+                                <input type="range" id="tau_slider" class="mt-1" step="any">
+                                <input type="number" id="tau_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm" step="any">
+                            </div>
+                            <!-- alpha -->
+                            <div>
+                                <label for="alpha_slider" class="block text-sm font-medium text-gray-700">α (Symmetric Broadening)</label>
+                                <input type="range" id="alpha_slider" class="mt-1" min="0.01" max="1" step="0.01">
+                                <input type="number" id="alpha_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm" min="0.01" max="1" step="0.01">
+                            </div>
+                            <!-- beta -->
+                            <div>
+                                <label for="beta_slider" class="block text-sm font-medium text-gray-700">β (Asymmetric Broadening)</label>
+                                <input type="range" id="beta_slider" class="mt-1" min="0.01" max="1" step="0.01">
+                                <input type="number" id="beta_input" class="mt-2 w-full p-2 border border-gray-300 rounded-md text-sm" min="0.01" max="1" step="0.01">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Report Display -->
+                <div class="mt-8">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Fit Report</h2>
+                    <div class="bg-gray-900 text-white font-mono text-sm p-6 rounded-lg overflow-x-auto">
+                        <pre id="report-output"></pre>
+                    </div>
+                </div>
+            </div>
+             <!-- Error Display -->
+            <div id="error-box" class="hidden mt-6 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
+                <h3 class="font-bold">An Error Occurred</h3>
+                <p id="error-message"></p>
+            </div>
+        </div>
+        <footer class="text-center mt-8 text-sm text-gray-500">
+            <p>Powered by Pyodide, lmfit, and plotly</p>
+            <div class="border-t border-gray-300 pt-2 mt-2">
+            <p class="font-semibold text-gray-700">Citation</p>
+            <p class="italic">Meddeb, B., & Meddeb, A. (2025). QuickFitter: Interactive Dielectric Data Fitting Tool - Havriliak-Negami Model.
+            <br>Available at: <a href="https://github.com/bmeddeb/QuickFitter" class="text-blue-600 hover:underline">https://github.com/bmeddeb/QuickFitter</a></p>
+        </div>
+        </footer>
+    </div>
+
+    <script type="text/javascript">
+        // DOM Elements
+        const fileUpload = document.getElementById('file-upload');
+        const runButton = document.getElementById('run-button');
+        const resetButton = document.getElementById('reset-button');
+        const downloadButton = document.getElementById('download-button');
+        const fitMethodSelect = document.getElementById('fit-method');
+        const statusDiv = document.getElementById('status');
+        const statusMessage = document.getElementById('status-message');
+        const outputDiv = document.getElementById('output');
+        const plotOutput = document.getElementById('plot-output');
+        const reportOutput = document.getElementById('report-output');
+        const errorBox = document.getElementById('error-box');
+        const errorMessage = document.getElementById('error-message');
+
+        // Parameter Controls
+        const paramControls = {
+            eps_inf: { slider: document.getElementById('eps_inf_slider'), input: document.getElementById('eps_inf_input') },
+            delta_eps: { slider: document.getElementById('delta_eps_slider'), input: document.getElementById('delta_eps_input') },
+            tau: { slider: document.getElementById('tau_slider'), input: document.getElementById('tau_input'), isLog: true },
+            alpha: { slider: document.getElementById('alpha_slider'), input: document.getElementById('alpha_input') },
+            beta: { slider: document.getElementById('beta_slider'), input: document.getElementById('beta_input') },
+        };
+
+        // Global State
+        let pyodide = null;
+        let fileContent = null;
+        let isPyodideReady = false;
+        let currentData = null;
+        let originalFilename = '';
+
+        // Python Script (continues from previous section)
+        const pythonScript = `
+import sys
+import io
+import json
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
+from lmfit import Minimizer, Parameters, fit_report
+import math
+import logging
+from typing import Dict, Tuple, Any, List, Optional
+from dataclasses import dataclass, field
+from scipy.optimize import differential_evolution
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Fit Evaluator Classes (adapted for HN model)
+@dataclass
+class MetricResult:
+    """Stores the evaluation result for a single metric."""
+    name: str
+    score: float
+    category: str
+    value: float
+    suggestion: str | None = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class ReportEvaluation:
+    """Stores the full evaluation for a report."""
+    metrics: Dict[str, MetricResult]
+    overall: MetricResult
+    suggestions: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    def to_markdown(self) -> str:
+        """Return the evaluation as a markdown-formatted table."""
+        headers = ["Metric", "Score", "Category", "Value", "Suggestion"]
+        lines = ["| " + " | ".join(headers) + " |",
+                 "| " + " | ".join(["---"]*len(headers)) + " |"]
+        for m in self.metrics.values():
+            suggestion = m.suggestion or ""
+            lines.append(f"| {m.name} | {m.score} | {m.category} | {m.value:.4g} | {suggestion} |")
+        lines.append(
+            f"| **Overall** | {self.overall.score} | {self.overall.category} | {self.overall.value} |  |"
+        )
+        if self.warnings:
+            lines.append("\\n**Warnings:**")
+            for warning in self.warnings:
+                lines.append(f"- {warning}")
+        return "\\n".join(lines)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert evaluation to dictionary format."""
+        return {
+            'overall_score': self.overall.score,
+            'overall_category': self.overall.category,
+            'metrics': {
+                k: {
+                    'score': v.score,
+                    'category': v.category,
+                    'value': v.value,
+                    'suggestion': v.suggestion,
+                    'details': v.details
+                }
+                for k, v in self.metrics.items()
+            },
+            'suggestions': self.suggestions,
+            'warnings': self.warnings,
+            'markdown_table': self.to_markdown()
+        }
+
+class FitEvaluator:
+    """Evaluates the quality of a fit report based on configurable metrics."""
+    DEFAULT_THRESHOLDS: Dict[str, Tuple[float, float, float, str]] = {
+        "reduced_chi_square": (1e-4, 1e-3, 1e-2, "Consider adjusting α or β parameters."),
+        "rms_real":           (0.005, 0.010, 0.020, "Refine ε_inf or Δε values."),
+        "rms_imag":           (0.001, 0.002, 0.005, "Adjust τ or broadening parameters."),
+        "mean_residual":      (1e-4, 5e-4, 1e-3, "Check for systematic bias in the model."),
+        "aic":                (2, 7, 14, "Model may be overparameterized."),
+        "bic":                (2, 7, 14, "Consider simpler model (Debye or Cole-Cole)."),
+    }
+
+    DEFAULT_WEIGHTS: Dict[str, int] = {
+        'dpv': 1,
+        'reduced_chi_square': 3,
+        'rms_real': 2,
+        'rms_imag': 2,
+        'mean_residual': 1,
+        'correlation': 2,
+        'aic': 2,
+        'bic': 2
+    }
+
+    def __init__(self, thresholds=None, weights=None):
+        self.thresholds = thresholds or FitEvaluator.DEFAULT_THRESHOLDS
+        self.weights = weights or FitEvaluator.DEFAULT_WEIGHTS
+
+    @classmethod
+    def from_json_report(cls, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert JSON report format to evaluator format."""
+        fit_stats = json_data.get('fit_statistics', {})
+        residuals = json_data.get('residual_analysis', {})
+        corr_matrix = json_data.get('correlation_matrix', [])
+        correlations = {}
+        if corr_matrix and isinstance(corr_matrix, list):
+            param_names = ['eps_inf', 'delta_eps', 'tau', 'alpha', 'beta']
+            try:
+                for i in range(len(corr_matrix)):
+                    for j in range(i+1, len(corr_matrix[0])):
+                        if abs(corr_matrix[i][j]) > 0.1:
+                            correlations[(param_names[i], param_names[j])] = corr_matrix[i][j]
+            except (IndexError, TypeError) as e:
+                logger.warning(f"Error parsing correlation matrix: {e}")
+
+        params = json_data.get('parameters', {})
+
+        return {
+            'n_data_points': fit_stats.get('n_data_points', 0),
+            'n_variables': fit_stats.get('n_variables', 5),
+            'reduced_chi_square': fit_stats.get('reduced_chi_square', 0),
+            'rms_real': residuals.get('real_part', {}).get('rms', 0),
+            'rms_imag': residuals.get('imaginary_part', {}).get('rms', 0),
+            'mean_real': residuals.get('real_part', {}).get('mean', 0),
+            'mean_imag': residuals.get('imaginary_part', {}).get('mean', 0),
+            'aic': json_data.get('information_criteria', {}).get('aic', 0),
+            'bic': json_data.get('information_criteria', {}).get('bic', 0),
+            'correlations': correlations,
+            'parameters': params,
+            'eps_inf': params.get('eps_inf', 0),
+            'delta_eps': params.get('delta_eps', 0),
+            'alpha': params.get('alpha', 1),
+            'beta': params.get('beta', 1)
+        }
+
+    def _validate_report(self, report: Dict[str, Any]) -> None:
+        """Validate report data types and values."""
+        try:
+            n_data = int(report['n_data_points'])
+            n_vars = int(report['n_variables'])
+            if n_vars <= 0:
+                raise ValueError("n_variables must be positive")
+            if n_data <= n_vars:
+                raise ValueError("n_data_points must exceed n_variables")
+            numeric_fields = ['reduced_chi_square', 'rms_real', 'rms_imag', 'mean_real', 'mean_imag']
+            for field in numeric_fields:
+                val = report.get(field, 0)
+                if not isinstance(val, (int, float)) or math.isnan(val):
+                    raise ValueError(f"{field} must be a valid number")
+        except (TypeError, ValueError, KeyError) as e:
+            raise ValueError(f"Invalid report data: {e}")
+
+    def _validate_physical_bounds(self, report: Dict[str, Any]) -> List[str]:
+        """Check if values are physically reasonable for HN model."""
+        warnings = []
+        if report.get('rms_real', 0) > 1.0:
+            warnings.append("RMS real part unusually high - check data quality")
+        if report.get('rms_imag', 0) > 0.1:
+            warnings.append("RMS imaginary part very high - check loss data quality")
+        rcs = report.get('reduced_chi_square', 0)
+        if rcs < 1e-6 and rcs > 0:
+            warnings.append("Reduced chi-square suspiciously low - possible overfitting")
+        elif rcs > 1.0:
+            warnings.append("Reduced chi-square > 1 - model may be inadequate")
+
+        # Check HN-specific parameters
+        eps_inf = report.get('eps_inf', 0)
+        if eps_inf < 1.0:
+            warnings.append("ε_∞ < 1.0 is unphysical for most materials")
+        elif eps_inf > 1000:
+            warnings.append("ε_∞ > 1000 is unusually high - check units and data")
+
+        alpha = report.get('alpha', 1)
+        beta = report.get('beta', 1)
+        if alpha <= 0 or alpha > 1:
+            warnings.append(f"α = {alpha:.3f} outside physical range (0, 1]")
+        if beta <= 0 or beta > 1:
+            warnings.append(f"β = {beta:.3f} outside physical range (0, 1]")
+
+        # Check for special cases
+        if abs(alpha - 1) < 0.01 and abs(beta - 1) < 0.01:
+            warnings.append("α ≈ 1 and β ≈ 1: Consider using simpler Debye model")
+        elif abs(beta - 1) < 0.01:
+            warnings.append("β ≈ 1: Consider using Cole-Cole model")
+        elif abs(alpha - 1) < 0.01:
+            warnings.append("α ≈ 1: Consider using Davidson-Cole model")
+
+        return warnings
+
+    def _evaluate_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
+        """Evaluates metrics where smaller values are better."""
+        godly_max, excellent_max, good_max = thresholds
+        if value < godly_max:
+            return 100, "Godly"
+        elif value < excellent_max:
+            return 80, "Excellent"
+        elif value < good_max:
+            return 60, "Good"
+        return 30, "Poor"
+
+    def _evaluate_inverse_scalar(self, value: float, thresholds: Tuple[float, float, float]) -> Tuple[int, str]:
+        """Evaluates metrics where larger values are better."""
+        poor_min, good_min, excellent_min = thresholds
+        if value >= excellent_min:
+            return 100, "Godly"
+        elif value >= good_min:
+            return 80, "Excellent"
+        elif value >= poor_min:
+            return 60, "Good"
+        return 30, "Poor"
+
+    def _evaluate_correlation(self, corr_value: float) -> Tuple[int, str, str | None]:
+        """Evaluates correlation, returning score, category, and suggestion."""
+        if not isinstance(corr_value, (int, float)) or math.isnan(corr_value):
+            return 30, "Invalid", "Check correlation calculation"
+        abs_corr = abs(corr_value)
+        if abs_corr < 0.50:
+            return 100, "Low", None
+        elif abs_corr < 0.80:
+            return 80, "Moderate", None
+        elif abs_corr < 0.95:
+            return 60, "High", "Consider fixing α or β parameter."
+        return 30, "Very High", "Parameters highly correlated - use global optimizer."
+
+    def evaluate(self, report: Dict[str, Any]) -> ReportEvaluation:
+        """Validates and evaluates a fit report dictionary."""
+        required = {
+            'n_data_points', 'n_variables', 'reduced_chi_square',
+            'rms_real', 'rms_imag', 'mean_real', 'mean_imag', 'correlations'
+        }
+        missing = required - report.keys()
+        if missing:
+            raise KeyError(f"Missing required report fields: {missing}")
+
+        self._validate_report(report)
+        warnings = self._validate_physical_bounds(report)
+
+        metrics: Dict[str, MetricResult] = {}
+        suggestions: List[str] = []
+
+        mean_res = max(abs(report['mean_real']), abs(report['mean_imag']))
+        report_vals = dict(report)
+        report_vals['mean_residual'] = mean_res
+
+        # Data-points-per-variable
+        dpv = report['n_data_points'] / report['n_variables']
+        dpv_score, dpv_cat = self._evaluate_inverse_scalar(dpv, (10, 20, 30))
+        dpv_sug = "Collect more data or use simpler model." if dpv_cat == "Poor" else None
+        metrics['dpv'] = MetricResult('dpv', dpv_score, dpv_cat, dpv, dpv_sug)
+        if dpv_sug:
+            suggestions.append(dpv_sug)
+
+        # Scalar metrics
+        for name, (g, e, gd, sug) in self.thresholds.items():
+            val = report_vals.get(name, 0)
+            sc, cat = self._evaluate_scalar(val, (g, e, gd))
+            sugg = sug if cat == "Poor" else None
+            metrics[name] = MetricResult(name, sc, cat, val, sugg)
+            if sugg:
+                suggestions.append(sugg)
+
+        # Correlation
+        corrs = report['correlations']
+        if not corrs:
+            corr_score, corr_cat, corr_sug = 100, "Low", None
+            worst_pair, worst_val = None, 0.0
+        else:
+            worst_pair, worst_val = max(corrs.items(), key=lambda kv: abs(kv[1]))
+            corr_score, corr_cat, corr_sug = self._evaluate_correlation(worst_val)
+
+        corr_result = MetricResult(
+            'correlation', corr_score, corr_cat,
+            worst_val, corr_sug, details={'pair': worst_pair}
+        )
+        metrics['correlation'] = corr_result
+        if corr_sug:
+            suggestions.append(corr_sug)
+
+        # Overall score
+        total_weight = sum(self.weights.values())
+        overall_score = sum(
+            metrics[k].score * self.weights.get(k, 1)
+            for k in metrics.keys()
+            if k in self.weights
+        ) / total_weight
+
+        if overall_score >= 90:
+            overall_cat = "Godly"
+        elif overall_score >= 75:
+            overall_cat = "Excellent"
+        elif overall_score >= 60:
+            overall_cat = "Good"
+        else:
+            overall_cat = "Poor"
+
+        overall = MetricResult("overall", round(overall_score, 1), overall_cat, round(overall_score, 1))
+        return ReportEvaluation(metrics=metrics, overall=overall, suggestions=suggestions, warnings=warnings)
+
+# Global variables to store data
+global_f_ghz = None
+global_complex_epsilon = None
+global_correlation_matrix = None
+global_measured_dk = None
+global_measured_df = None
+
+def load_data(csv_content):
+    global global_f_ghz, global_complex_epsilon
+    try:
+        data = pd.read_csv(io.StringIO(csv_content)).dropna()
+        f_ghz = data.iloc[:, 0].values
+        dk = data.iloc[:, 1].values
+        df = data.iloc[:, 2].values
+        complex_epsilon = dk - 1j * (dk * df)
+        global_f_ghz = f_ghz
+        global_complex_epsilon = complex_epsilon
+        return f_ghz, complex_epsilon
+    except Exception as e:
+        raise ValueError(f"Failed to parse CSV: {e}")
+
+def estimate_initial_parameters(f_ghz, complex_epsilon):
+    """Estimate initial parameters for Havriliak-Negami model."""
+    dk = np.real(complex_epsilon)
+    df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
+
+    # Estimate eps_inf and eps_s
+    high_freq_idx = int(0.8 * len(dk))
+    low_freq_idx = int(0.2 * len(dk))
+
+    eps_inf_init = np.median(dk[high_freq_idx:]) if high_freq_idx < len(dk) else dk[-1]
+    eps_s_init = np.median(dk[:low_freq_idx]) if low_freq_idx > 0 else dk[0]
+
+    # Ensure physical constraints
+    eps_inf_init = max(1.0, eps_inf_init)
+    eps_s_init = max(eps_inf_init + 0.1, eps_s_init)
+
+    delta_eps_init = eps_s_init - eps_inf_init
+
+    # Estimate tau from peak in loss
+    max_loss_idx = np.argmax(-np.imag(complex_epsilon))
+    f_max = f_ghz[max_loss_idx]
+    tau_init = 1 / (2 * np.pi * f_max * 1e9)
+
+    # Initial guess for broadening parameters
+    # Start with Cole-Cole like behavior
+    alpha_init = 0.9  # Slight symmetric broadening
+    beta_init = 0.95   # Slight asymmetric broadening
+
+    # Try to estimate broadening from width of loss peak
+    loss = -np.imag(complex_epsilon)
+    max_loss = np.max(loss)
+    half_max = max_loss / 2
+
+    # Find width at half maximum
+    indices = np.where(loss > half_max)[0]
+    if len(indices) > 1:
+        width_factor = (f_ghz[indices[-1]] - f_ghz[indices[0]]) / f_max
+        # Broader peak suggests lower alpha
+        if width_factor > 2:
+            alpha_init = 0.7
+        elif width_factor > 1.5:
+            alpha_init = 0.8
+
+    return {
+        'eps_inf': eps_inf_init,
+        'delta_eps': delta_eps_init,
+        'tau': tau_init,
+        'alpha': alpha_init,
+        'beta': beta_init
+    }
+
+def calculate_model_from_params(eps_inf, delta_eps, tau, alpha, beta):
+    """Calculate HN model from manual parameters."""
+    global global_f_ghz
+    if global_f_ghz is None:
+        return json.dumps({"error": "No data loaded"})
+
+    f_ghz = global_f_ghz
+    omega = 2 * np.pi * f_ghz * 1e9
+
+    # Havriliak-Negami model
+    # ε*(ω) = ε_∞ + Δε / (1 + (jωτ)^α)^β
+    with np.errstate(divide='ignore', invalid='ignore'):
+        if tau <= 0 or alpha <= 0 or alpha > 1 or beta <= 0 or beta > 1:
+            eps_complex = np.full_like(f_ghz, np.nan, dtype=complex)
+        else:
+            jwτ = 1j * omega * tau
+            denominator = (1 + jwτ**alpha)**beta
+            eps_complex = eps_inf + delta_eps / denominator
+
+    eps_prime = np.real(eps_complex)
+    eps_double_prime = -np.imag(eps_complex)
+
+    return json.dumps({
+        "eps_prime": eps_prime.tolist(),
+        "eps_double_prime": eps_double_prime.tolist()
+    })
+
+def calculate_model(params, f_ghz):
+    """Calculate HN model for optimization."""
+    p = params
+    omega = 2 * np.pi * f_ghz * 1e9
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        if p['tau'] <= 0 or p['alpha'] <= 0 or p['alpha'] > 1 or p['beta'] <= 0 or p['beta'] > 1:
+            return np.full_like(f_ghz, np.nan, dtype=complex)
+        else:
+            jwτ = 1j * omega * p['tau']
+            denominator = (1 + jwτ**p['alpha'])**p['beta']
+            eps_complex = p['eps_inf'] + p['delta_eps'] / denominator
+
+    return eps_complex
+
+def residual(params, f_ghz, complex_epsilon_data):
+    """Residual function for HN model."""
+    p_dict = params.valuesdict()
+    model_epsilon = calculate_model(p_dict, f_ghz)
+
+    # Dynamic-range scaling factors
+    scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
+
+    real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data)) / scale_real
+    imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data)) / scale_imag
+
+    return np.concatenate([real_residual, imag_residual])
+
+def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
+    """Calculate Jacobian matrix using finite differences."""
+    param_names = ['eps_inf', 'delta_eps', 'tau', 'alpha', 'beta']
+    n_params = len(param_names)
+    n_data = len(f_ghz) * 2  # real and imag parts
+
+    jacobian = np.zeros((n_data, n_params))
+
+    # Dynamic-range scaling factors
+    scale_real = np.max(np.abs(np.real(global_complex_epsilon))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0
+
+    # Base model
+    base_model = calculate_model(params_dict, f_ghz)
+    base_residual = np.concatenate([
+        np.real(base_model) / scale_real,
+        np.imag(base_model) / scale_imag
+    ])
+
+    # Calculate derivatives
+    for i, param_name in enumerate(param_names):
+        if param_name == 'tau':
+            # Use log step for tau
+            step = rel_step * abs(params_dict[param_name]) + 1e-15
+        elif param_name in ['alpha', 'beta']:
+            # Small absolute step for bounded parameters
+            step = 1e-4
+        else:
+            step = rel_step * abs(params_dict[param_name]) + abs_step
+
+        params_plus = params_dict.copy()
+        params_plus[param_name] += step
+
+        model_plus = calculate_model(params_plus, f_ghz)
+        residual_plus = np.concatenate([
+            np.real(model_plus) / scale_real,
+            np.imag(model_plus) / scale_imag
+        ])
+
+        jacobian[:, i] = (residual_plus - base_residual) / step
+
+    return jacobian
+
+def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
+    """Calculate correlation matrix from Jacobian."""
+    try:
+        # Calculate Jacobian
+        J = calculate_jacobian(params_dict, f_ghz)
+
+        # Calculate covariance matrix: (J^T J)^-1
+        JTJ = np.dot(J.T, J)
+
+        # Add small regularization
+        JTJ += np.eye(JTJ.shape[0]) * 1e-10
+
+        # Calculate covariance
+        cov_matrix = np.linalg.inv(JTJ)
+
+        # Convert to correlation matrix
+        std_devs = np.sqrt(np.diag(cov_matrix))
+        corr_matrix = np.zeros_like(cov_matrix)
+
+        for i in range(len(std_devs)):
+            for j in range(len(std_devs)):
+                if std_devs[i] > 0 and std_devs[j] > 0:
+                    corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
+                else:
+                    corr_matrix[i, j] = 0
+
+        return corr_matrix
+    except:
+        return None
+
+def format_correlation_matrix(corr_matrix):
+    """Format correlation matrix for display."""
+    if corr_matrix is None:
+        return "Unable to calculate correlation matrix"
+
+    param_names = ['eps_inf', 'delta_eps', 'tau', 'alpha', 'beta']
+    result = "Correlations:\\n"
+
+    for i, param1 in enumerate(param_names):
+        for j, param2 in enumerate(param_names):
+            if j > i:  # Only show upper triangle
+                correlation = corr_matrix[i, j]
+                if abs(correlation) > 0.1:  # Only show significant correlations
+                    result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
+
+    return result
+
+def identify_model_type(alpha, beta):
+    """Identify special cases of HN model."""
+    tolerance = 0.02
+
+    if abs(alpha - 1) < tolerance and abs(beta - 1) < tolerance:
+        return "Debye", "α ≈ 1, β ≈ 1 (Simple Debye relaxation)"
+    elif abs(beta - 1) < tolerance:
+        return "Cole-Cole", f"β ≈ 1, α = {alpha:.3f} (Cole-Cole model)"
+    elif abs(alpha - 1) < tolerance:
+        return "Davidson-Cole", f"α ≈ 1, β = {beta:.3f} (Davidson-Cole model)"
+    else:
+        return "Havriliak-Negami", f"α = {alpha:.3f}, β = {beta:.3f} (Full HN model)"
+
+def create_updated_report(eps_inf, delta_eps, tau, alpha, beta):
+    """Create updated report with current parameters."""
+    global global_f_ghz, global_complex_epsilon
+    if global_f_ghz is None:
+        return json.dumps({"error": "No data loaded"})
+
+    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'tau': tau, 'alpha': alpha, 'beta': beta}
+    model_epsilon = calculate_model(params, global_f_ghz)
+
+    real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
+    imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
+
+    n_dat = len(real_residuals) + len(imag_residuals)
+    n_var = 5
+    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    rss = chi_sqr
+    red_chi_sqr = rss / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+    # Information criteria
+    aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
+    bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
+
+    # Calculate correlation matrix
+    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
+    corr_text = format_correlation_matrix(corr_matrix)
+
+    # Identify model type
+    model_type, model_desc = identify_model_type(alpha, beta)
+
+    # Calculate relaxation frequency
+    f_relax = 1 / (2 * np.pi * tau) / 1e9 if tau > 0 else 0
+
+    # Create JSON data structure
+    json_data = {
+        "model": "Havriliak-Negami",
+        "model_type": model_type,
+        "timestamp": datetime.now().isoformat(),
+        "parameters": {
+            "eps_inf": eps_inf,
+            "delta_eps": delta_eps,
+            "tau": tau,
+            "alpha": alpha,
+            "beta": beta,
+            "f_relax_ghz": f_relax
+        },
+        "fit_statistics": {
+            "n_data_points": n_dat,
+            "n_variables": n_var,
+            "chi_square": chi_sqr,
+            "reduced_chi_square": red_chi_sqr
+        },
+        "information_criteria": {
+            "aic": aic,
+            "bic": bic
+        },
+        "residual_analysis": {
+            "real_part": {
+                "mean": float(np.mean(real_residuals)),
+                "std_dev": float(np.std(real_residuals)),
+                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+            },
+            "imaginary_part": {
+                "mean": float(np.mean(imag_residuals)),
+                "std_dev": float(np.std(imag_residuals)),
+                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            }
+        },
+        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+    }
+
+    report = f"""Havriliak-Negami Fit Report
+{'=' * 50}
+Date: {datetime.now()}
+
+Model and Parameters
+--------------------------------------------------
+ε*(ω) = ε_∞ + Δε / (1 + (jωτ)^α)^β
+
+Model Type: {model_desc}
+
+Using current values (manual):
+    eps_inf   = {eps_inf:.4f}
+    delta_eps = {delta_eps:.4f}
+    tau       = {tau:.4e} s
+    alpha     = {alpha:.4f}
+    beta      = {beta:.4f}
+
+    f_relax   = {f_relax:.4f} GHz
+
+Fit Statistics
+    # data points = {n_dat}
+    # variables   = {n_var}
+    chi-square    = {chi_sqr:.4f}
+    reduced chi-square = {red_chi_sqr:.4f}
+    AIC              = {aic:.4f}
+    BIC              = {bic:.4f}
+
+Residual Analysis
+    Real Part (Dk):
+        Mean: {np.mean(real_residuals):.4f}
+        Std Dev: {np.std(real_residuals):.4f}
+        RMS: {np.sqrt(np.mean(real_residuals**2)):.4f}
+    Imaginary Part (Loss Factor):
+        Mean: {np.mean(imag_residuals):.4f}
+        Std Dev: {np.std(imag_residuals):.4f}
+        RMS: {np.sqrt(np.mean(imag_residuals**2)):.4f}
+
+{corr_text}
+"""
+    return json.dumps({"report": report, "json_data": json_data})
+
+def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
+    """Create main frequency domain plots."""
+    fig = make_subplots(rows=2, cols=1, subplot_titles=('Real Permittivity', 'Loss Tangent'))
+    fig.add_trace(go.Scatter(x=f_ghz, y=np.real(measured_eps), mode='markers', name='Measured Dk', marker=dict(color='black')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=f_ghz, y=np.real(fitted_eps), mode='lines', name='Fitted Dk', line=dict(color='red')), row=1, col=1)
+    measured_df = -np.imag(measured_eps) / np.real(measured_eps)
+    fitted_df = -np.imag(fitted_eps) / np.real(fitted_eps)
+    fig.add_trace(go.Scatter(x=f_ghz, y=measured_df, mode='markers', name='Measured Df', marker=dict(color='black'), showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=f_ghz, y=fitted_df, mode='lines', name='Fitted Df', line=dict(color='red'), showlegend=False), row=2, col=1)
+    fig.update_xaxes(title_text="Frequency (GHz)", row=1, col=1)
+    fig.update_yaxes(title_text="Dielectric Constant (Dk)", row=1, col=1)
+    fig.update_xaxes(title_text="Frequency (GHz)", row=2, col=1)
+    fig.update_yaxes(title_text="Dissipation Factor (Df)", row=2, col=1)
+    fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), template="plotly_white", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99))
+    return pio.to_json(fig)
+
+def create_cole_cole_plot(f_ghz, measured_eps, fitted_eps):
+    """Create Cole-Cole plot (ε'' vs ε')."""
+    fig = go.Figure()
+
+    # Measured data
+    fig.add_trace(go.Scatter(
+        x=np.real(measured_eps),
+        y=-np.imag(measured_eps),
+        mode='markers',
+        name='Measured',
+        marker=dict(color='black', size=6)
+    ))
+
+    # Fitted data
+    fig.add_trace(go.Scatter(
+        x=np.real(fitted_eps),
+        y=-np.imag(fitted_eps),
+        mode='lines',
+        name='Fitted',
+        line=dict(color='red', width=2)
+    ))
+
+    fig.update_layout(
+        title="Cole-Cole Plot",
+        xaxis_title="ε' (Real Permittivity)",
+        yaxis_title="ε'' (Imaginary Permittivity)",
+        height=400,
+        template="plotly_white",
+        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+    )
+
+    return pio.to_json(fig)
+
+def evaluate_current_fit(eps_inf, delta_eps, tau, alpha, beta):
+    """Evaluate the current fit quality."""
+    global global_f_ghz, global_complex_epsilon
+    if global_f_ghz is None:
+        return json.dumps({"error": "No data loaded"})
+
+    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'tau': tau, 'alpha': alpha, 'beta': beta}
+    model_epsilon = calculate_model(params, global_f_ghz)
+
+    real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
+    imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
+
+    n_dat = len(real_residuals) + len(imag_residuals)
+    n_var = 5
+    chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+    # Calculate correlation matrix
+    corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
+
+    # Create JSON report format
+    json_report = {
+        "model": "Havriliak-Negami",
+        "timestamp": datetime.now().isoformat(),
+        "parameters": params,
+        "fit_statistics": {
+            "n_data_points": n_dat,
+            "n_variables": n_var,
+            "chi_square": chi_sqr,
+            "reduced_chi_square": red_chi_sqr
+        },
+        "residual_analysis": {
+            "real_part": {
+                "mean": float(np.mean(real_residuals)),
+                "std_dev": float(np.std(real_residuals)),
+                "rms": float(np.sqrt(np.mean(real_residuals**2)))
+            },
+            "imaginary_part": {
+                "mean": float(np.mean(imag_residuals)),
+                "std_dev": float(np.std(imag_residuals)),
+                "rms": float(np.sqrt(np.mean(imag_residuals**2)))
+            }
+        },
+        "information_criteria": {
+            "aic": 2 * n_var + n_dat * np.log(chi_sqr / n_dat) if n_dat > 0 else 0,
+            "bic": n_var * np.log(n_dat) + n_dat * np.log(chi_sqr / n_dat) if n_dat > 0 else 0
+        },
+        "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
+    }
+
+    # Evaluate the fit
+    try:
+        evaluator = FitEvaluator()
+        report_data = FitEvaluator.from_json_report(json_report)
+        evaluation = evaluator.evaluate(report_data)
+        json_report['evaluation'] = evaluation.to_dict()
+    except Exception as e:
+        logger.warning(f"Could not evaluate fit: {e}")
+        json_report['evaluation'] = None
+
+    return json.dumps(json_report)
+
+def create_downloadable_plot(eps_inf, delta_eps, tau, alpha, beta):
+    """Create matplotlib plot for download."""
+    global global_f_ghz, global_complex_epsilon
+    if global_f_ghz is None:
+        return None
+
+    params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'tau': tau, 'alpha': alpha, 'beta': beta}
+    fitted_epsilon = calculate_model(params, global_f_ghz)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+
+    ax1.plot(global_f_ghz, np.real(global_complex_epsilon), 'ko', label='Measured')
+    ax1.plot(global_f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
+    ax1.set_xlabel('Frequency (GHz)')
+    ax1.set_ylabel('Dielectric Constant (Dk)')
+    ax1.set_title('Real Permittivity')
+    ax1.legend()
+    ax1.grid(True, alpha=0.5)
+
+    measured_df = -np.imag(global_complex_epsilon) / np.real(global_complex_epsilon)
+    fitted_df = -np.imag(fitted_epsilon) / np.real(fitted_epsilon)
+    ax2.plot(global_f_ghz, measured_df, 'ko', label='Measured')
+    ax2.plot(global_f_ghz, fitted_df, 'r-', lw=2, label='Fitted')
+    ax2.set_xlabel('Frequency (GHz)')
+    ax2.set_ylabel('Dissipation Factor (Df)')
+    ax2.set_title('Loss Tangent')
+    ax2.legend()
+    ax2.grid(True, alpha=0.5)
+
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+def run_analysis(csv_content, method):
+    """Run the HN model fitting analysis."""
+    global global_f_ghz, global_complex_epsilon, global_correlation_matrix
+    global global_measured_dk, global_measured_df
+
+    f_ghz, complex_epsilon_data = load_data(csv_content)
+
+    # Store measured data globally
+    global_measured_dk = np.real(complex_epsilon_data).tolist()
+    global_measured_df = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
+
+    initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data)
+
+    if method == 'differential_evolution':
+        # Use global optimizer for HN model due to parameter correlations
+        bounds = [
+            (1.0, np.real(complex_epsilon_data).max()),  # eps_inf
+            (0.1, np.real(complex_epsilon_data).max()),  # delta_eps
+            (1e-15, 1e-6),  # tau
+            (0.01, 1.0),    # alpha
+            (0.01, 1.0)     # beta
+        ]
+
+        def objective(x):
+            params_dict = {
+                'eps_inf': x[0],
+                'delta_eps': x[1],
+                'tau': x[2],
+                'alpha': x[3],
+                'beta': x[4]
+            }
+            model = calculate_model(params_dict, f_ghz)
+            scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
+            scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
+            real_res = (np.real(model) - np.real(complex_epsilon_data)) / scale_real
+            imag_res = (np.imag(model) - np.imag(complex_epsilon_data)) / scale_imag
+            return np.sum(real_res**2) + np.sum(imag_res**2)
+
+        result_de = differential_evolution(objective, bounds, seed=42, maxiter=1000)
+        fit_params = {
+            'eps_inf': float(result_de.x[0]),
+            'delta_eps': float(result_de.x[1]),
+            'tau': float(result_de.x[2]),
+            'alpha': float(result_de.x[3]),
+            'beta': float(result_de.x[4])
+        }
+
+    else:
+        # Use lmfit for local optimization
+        params = Parameters()
+        dk_data = np.real(complex_epsilon_data)
+        params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
+        params.add('delta_eps', value=initial_params['delta_eps'], min=0.1, max=dk_data.max())
+        params.add('tau', value=initial_params['tau'], min=1e-15, max=1e-6)
+        params.add('alpha', value=initial_params['alpha'], min=0.01, max=1.0)
+        params.add('beta', value=initial_params['beta'], min=0.01, max=1.0)
+
+        minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data))
+        result = minimizer.minimize(method=method)
+
+        fit_params = {p: float(v.value) for p, v in result.params.items()}
+
+    # Calculate fitted model
+    fitted_epsilon = calculate_model(fit_params, f_ghz)
+
+    # Calculate statistics
+    real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
+    imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon_data)
+    n_dat = len(real_residuals) + len(imag_residuals)
+    n_var = 5
+    rss = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
+    aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
+    bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
+
+    # Calculate correlation matrix
+    corr_matrix = calculate_correlation_matrix(fit_params, f_ghz, complex_epsilon_data)
+    global_correlation_matrix = corr_matrix
+    corr_text = format_correlation_matrix(corr_matrix)
+
+    # Identify model type
+    model_type, model_desc = identify_model_type(fit_params['alpha'], fit_params['beta'])
+
+    # Calculate relaxation frequency
+    f_relax = 1 / (2 * np.pi * fit_params['tau']) / 1e9 if fit_params['tau'] > 0 else 0
+
+    # Generate report
+    model_section = f"""Model and Parameters
+--------------------------------------------------
+ε*(ω) = ε_∞ + Δε / (1 + (jωτ)^α)^β
+
+Model Type: {model_desc}
+
+Using fitted values:
+    eps_inf   = {fit_params['eps_inf']:.4f}
+    delta_eps = {fit_params['delta_eps']:.4f}
+    tau       = {fit_params['tau']:.4e} s
+    alpha     = {fit_params['alpha']:.4f}
+    beta      = {fit_params['beta']:.4f}
+
+    f_relax   = {f_relax:.4f} GHz
+
+Information Criteria:
+    AIC = {aic:.4f}
+    BIC = {bic:.4f}
+"""
+
+    # Create fit report
+    if method != 'differential_evolution':
+        report_content = fit_report(result).replace('[[', '').replace(']]', '')
+        full_report = f"Havriliak-Negami Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{report_content}"
+    else:
+        stats_section = f"""Fit Statistics
+    # data points = {n_dat}
+    # variables   = {n_var}
+    chi-square    = {rss:.4f}
+    reduced chi-square = {rss / (n_dat - n_var):.4f}
+
+Residual Analysis
+    Real Part (Dk):
+        RMS: {np.sqrt(np.mean(real_residuals**2)):.4f}
+    Imaginary Part (Loss Factor):
+        RMS: {np.sqrt(np.mean(imag_residuals**2)):.4f}
+
+{corr_text}"""
+        full_report = f"Havriliak-Negami Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{stats_section}"
+
+    plot_json = create_plotly_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
+    cole_cole_json = create_cole_cole_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
+
+    return_data = {
+        "report": full_report,
+        "plot_json": plot_json,
+        "cole_cole_json": cole_cole_json,
+        "f_ghz": f_ghz.tolist(),
+        "fitted_params": fit_params,
+        "correlations": corr_text,
+        "measured_dk": global_measured_dk,
+        "measured_df": global_measured_df,
+        "model_type": model_type,
+        "model_desc": model_desc
+    }
+    return json.dumps(return_data)'
