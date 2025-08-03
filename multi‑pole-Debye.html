@@ -6,7 +6,7 @@
     <title>Interactive Multi-Pole Debye Model Fitter</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
@@ -559,7 +559,7 @@ def load_data(csv_content):
         f_ghz = data.iloc[:, 0].values
         dk = data.iloc[:, 1].values
         df = data.iloc[:, 2].values
-        
+
         # Check for uncertainty columns (columns 4 and 5)
         if data.shape[1] >= 5:
             # Uncertainties provided
@@ -567,7 +567,7 @@ def load_data(csv_content):
             sigma_df = data.iloc[:, 4].values
             global_sigma_dk = sigma_dk
             global_sigma_df = sigma_df
-            
+
             # Calculate weights as 1/sigma^2 (variance weighting)
             # Avoid division by zero
             global_weights_real = np.where(sigma_dk > 0, 1.0 / sigma_dk**2, 1.0)
@@ -576,15 +576,15 @@ def load_data(csv_content):
             # No uncertainties provided - use default weighting
             global_sigma_dk = None
             global_sigma_df = None
-            
+
             # Weight imaginary part by 1/Dk^2 to balance relative errors
             global_weights_real = np.ones_like(dk)
             global_weights_imag = 1.0 / dk**2  # Weight by 1/Dk^2 for Df
-        
+
         # Normalize weights to have mean = 1 for each component
         global_weights_real = global_weights_real / np.mean(global_weights_real)
         global_weights_imag = global_weights_imag / np.mean(global_weights_imag)
-        
+
         complex_epsilon = dk - 1j * (dk * df)
         global_f_ghz = f_ghz
         global_complex_epsilon = complex_epsilon
@@ -595,18 +595,18 @@ def load_data(csv_content):
 def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=20):
     """Perform a quick fit for BIC calculation with limited iterations."""
     params = Parameters()
-    
+
     # Add epsilon infinity
     dk_data = np.real(complex_epsilon)
     params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
-    
+
     # Add poles
     for i in range(n_poles):
         params.add(f'delta_eps_{i}',
                   value=initial_params.get(f'delta_eps_{i}', 0.5),
                   min=0,  # Physical constraint
-                  max=dk_data.max() - 1.0)
-        
+                  max=max(dk_data.max() - 0.1, 0.5))  # Safe upper bound for low-ε materials
+
         # Use log-tau parameterization
         tau_i = initial_params.get(f'tau_{i}', 1e-9)
         log_tau_i = np.log10(tau_i)
@@ -614,88 +614,94 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=2
                   value=log_tau_i,
                   min=-15,
                   max=-6)
-    
+
     # Add constraints for ordered relaxation times in log-space
     for i in range(1, n_poles):
         params.add(f'log_tau_ratio_{i}', value=0.3, min=np.log10(1.1), max=2.0)
         params[f'log_tau_{i}'].expr = f'log_tau_{i-1} + log_tau_ratio_{i}'
-    
+
     # Quick minimization with limited iterations
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon, n_poles))
     result = minimizer.minimize(method='leastsq', max_nfev=max_iter)
-    
-    # Calculate BIC
-    residuals = residual(result.params, f_ghz, complex_epsilon, n_poles)
-    n_data = len(residuals)
+
+    # Calculate BIC using unscaled residuals
+    # Get model prediction
+    fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
+    real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon)
+    imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon)
+
+    # Calculate unscaled RSS for comparable BIC
+    unscaled_rss = calculate_unscaled_rss(real_residuals, imag_residuals)
+
+    n_data = len(real_residuals) + len(imag_residuals)
     n_params = n_poles * 2 + 1  # delta_eps and tau for each pole, plus eps_inf
-    rss = np.sum(residuals**2)
-    
-    if n_data > 0 and rss > 0:
-        bic = n_params * np.log(n_data) + n_data * np.log(rss / n_data)
+
+    if n_data > 0 and unscaled_rss > 0:
+        bic = n_params * np.log(n_data) + n_data * np.log(unscaled_rss / n_data)
     else:
         bic = np.inf
-    
-    return {'bic': bic, 'params': result.params.valuesdict(), 'rss': rss}
+
+    return {'bic': bic, 'params': result.params.valuesdict(), 'rss': unscaled_rss}
 
 def select_poles_bic(f_ghz, complex_epsilon, max_poles=4):
     """Select optimal number of poles using Bayesian Information Criterion."""
     bic_best, best_n = np.inf, 1
     bic_values = {}
-    
+
     for n in range(1, max_poles + 1):
         try:
             # Get initial parameters for n poles
             initial_params = estimate_initial_parameters(f_ghz, complex_epsilon, n, random_seed=42)
-            
+
             # Perform quick fit
             fit_result = quick_single_fit(f_ghz, complex_epsilon, initial_params, n)
             bic = fit_result['bic']
             bic_values[n] = bic
-            
+
             # Check if this model is significantly better (ΔBIC > 2)
             if bic < bic_best - 2:
                 bic_best, best_n = bic, n
-                
+
         except Exception as e:
             logger.warning(f"BIC calculation failed for {n} poles: {e}")
             continue
-    
+
     logger.info(f"BIC values: {bic_values}")
     logger.info(f"Selected {best_n} poles with BIC = {bic_best:.2f}")
-    
+
     return best_n
 
 def detect_poles_second_derivative(f_ghz, complex_epsilon):
     """Detect poles using second derivative of log(ε″)."""
     eps_imag = -np.imag(complex_epsilon)
-    
+
     # Remove zero or negative values for log
     valid_mask = eps_imag > 1e-10
     if np.sum(valid_mask) < 10:
         return 1
-    
+
     f_valid = f_ghz[valid_mask]
     eps_valid = eps_imag[valid_mask]
-    
+
     # Take log and smooth
     log_eps = np.log(eps_valid)
-    
+
     # Calculate derivatives using finite differences
     if len(log_eps) < 5:
         return 1
-    
+
     # First derivative
     d1_log_eps = np.gradient(log_eps, f_valid)
-    
+
     # Second derivative
     d2_log_eps = np.gradient(d1_log_eps, f_valid)
-    
+
     # Find zero crossings of second derivative (inflection points)
     zero_crossings = []
     for i in range(1, len(d2_log_eps) - 1):
         if d2_log_eps[i-1] * d2_log_eps[i+1] < 0:  # Sign change
             zero_crossings.append(i)
-    
+
     # Filter out closely spaced crossings
     if len(zero_crossings) > 1:
         filtered_crossings = [zero_crossings[0]]
@@ -703,35 +709,35 @@ def detect_poles_second_derivative(f_ghz, complex_epsilon):
             if zc - filtered_crossings[-1] > len(d2_log_eps) // 10:  # Minimum separation
                 filtered_crossings.append(zc)
         zero_crossings = filtered_crossings
-    
+
     # Number of poles approximately equals number of inflection points
     n_poles = max(1, min(len(zero_crossings), 4))
-    
+
     return n_poles
 
 def detect_number_of_poles(f_ghz, complex_epsilon):
     """Auto-detect the number of Debye poles using multiple methods."""
     eps_imag = -np.imag(complex_epsilon)
-    
+
     if len(eps_imag) < 5:
         return 1, "insufficient_data"
-    
+
     detection_method = None
-    
+
     # Method 1: BIC-based selection (most robust)
     try:
         n_poles_bic = select_poles_bic(f_ghz, complex_epsilon, max_poles=4)
     except Exception as e:
         logger.warning(f"BIC method failed: {e}")
         n_poles_bic = None
-    
+
     # Method 2: Second derivative of log(ε″)
     try:
         n_poles_d2 = detect_poles_second_derivative(f_ghz, complex_epsilon)
     except Exception as e:
         logger.warning(f"Second derivative method failed: {e}")
         n_poles_d2 = None
-    
+
     # Method 3: Peak finding (fallback, improved)
     try:
         # Smooth the data with adaptive window
@@ -740,14 +746,14 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
             smoothed = np.convolve(eps_imag, np.ones(window)/window, mode='valid')
         else:
             smoothed = eps_imag
-        
+
         # Dynamic prominence based on noise level
         noise_level = np.std(np.diff(smoothed))
         prominence = max(0.02 * np.max(smoothed), 3 * noise_level)
-        
-        peaks, properties = find_peaks(smoothed, prominence=prominence, distance=len(smoothed)//10)
+
+        peaks, properties = find_peaks(smoothed, prominence=prominence, distance=max(1, len(smoothed)//10))
         n_poles_peaks = len(peaks)
-        
+
         if n_poles_peaks == 0:
             n_poles_peaks = 1
         elif n_poles_peaks > 4:
@@ -755,7 +761,7 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
     except Exception as e:
         logger.warning(f"Peak finding method failed: {e}")
         n_poles_peaks = 1
-    
+
     # Combine results with preference for BIC
     if n_poles_bic is not None:
         n_poles = n_poles_bic
@@ -769,46 +775,46 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
         n_poles = n_poles_peaks
         detection_method = "peak_finding"
         logger.info(f"Using peak finding method: {n_poles} poles")
-    
+
     return n_poles, detection_method
 
 def estimate_tau_cole_cole(f_ghz, complex_epsilon, eps_inf=None, eps_s=None):
     """Estimate relaxation time using Cole-Cole transformation."""
     dk = np.real(complex_epsilon)
-    
+
     # Estimate eps_inf and eps_s if not provided
     if eps_inf is None:
         # Use high-frequency limit (last 10% of data)
         high_freq_idx = int(0.9 * len(dk))
         eps_inf = np.mean(dk[high_freq_idx:]) if high_freq_idx < len(dk) else dk[-1]
-    
+
     if eps_s is None:
         # Use low-frequency limit (first 10% of data)
         low_freq_idx = int(0.1 * len(dk))
         eps_s = np.mean(dk[:low_freq_idx]) if low_freq_idx > 0 else dk[0]
-    
+
     # Avoid division by zero
     if abs(eps_s - eps_inf) < 1e-6:
         return None
-    
+
     # Cole-Cole transformation
     # For Debye model: (ε - ε∞)/(εs - ε∞) = 1/(1 + jωτ)
     # Phase angle φ = arctan(ωτ), so φ = π/4 when ωτ = 1
     try:
         # Calculate normalized complex permittivity
         eps_norm = (complex_epsilon - eps_inf) / (eps_s - eps_inf)
-        
+
         # Calculate phase angle
         phi = np.angle(eps_norm)
-        
+
         # Find frequency where phase is closest to -π/4 (for Debye relaxation)
         target_phase = -np.pi / 4
         idx_min = np.argmin(np.abs(phi - target_phase))
-        
+
         # Estimate tau from this frequency
         f_relax = f_ghz[idx_min]
         tau_est = 1 / (2 * np.pi * f_relax * 1e9)
-        
+
         return tau_est
     except Exception as e:
         logger.warning(f"Cole-Cole tau estimation failed: {e}")
@@ -817,32 +823,32 @@ def estimate_tau_cole_cole(f_ghz, complex_epsilon, eps_inf=None, eps_s=None):
 def find_loss_peaks_advanced(f_ghz, complex_epsilon, n_expected=None):
     """Find loss peaks with improved peak detection for overlapping relaxations."""
     eps_imag = -np.imag(complex_epsilon)
-    
+
     if len(eps_imag) < 3:
         return []
-    
+
     # Apply mild smoothing to reduce noise
     window = min(5, len(eps_imag) // 5)
     if window >= 3:
         eps_smooth = np.convolve(eps_imag, np.ones(window)/window, mode='same')
     else:
         eps_smooth = eps_imag
-    
+
     # Find all local maxima
     peaks = []
     for i in range(1, len(eps_smooth) - 1):
         if eps_smooth[i] > eps_smooth[i-1] and eps_smooth[i] > eps_smooth[i+1]:
             peaks.append(i)
-    
+
     if not peaks:
         # If no peaks found, use maximum
         peaks = [np.argmax(eps_smooth)]
-    
+
     # Sort peaks by prominence
     peak_values = [eps_smooth[p] for p in peaks]
     sorted_indices = np.argsort(peak_values)[::-1]
     peaks = [peaks[i] for i in sorted_indices]
-    
+
     # If we expect a certain number of peaks, try to find them
     if n_expected and len(peaks) < n_expected:
         # Look for shoulders or inflection points
@@ -851,17 +857,17 @@ def find_loss_peaks_advanced(f_ghz, complex_epsilon, n_expected=None):
             if d2_eps[i-1] > 0 and d2_eps[i+1] < 0:  # Inflection point
                 if i not in peaks:
                     peaks.append(i)
-    
+
     # Convert to frequencies
     peak_frequencies = [f_ghz[p] for p in peaks[:n_expected] if p < len(f_ghz)]
-    
+
     return peak_frequencies
 
 def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_seed=None):
     """Estimate initial parameters for Multi-Pole Debye model with improved tau estimation."""
     dk = np.real(complex_epsilon)
     df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
-    
+
     # Set random seed for reproducibility
     if random_seed is not None:
         np.random.seed(random_seed)
@@ -874,14 +880,14 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_see
     # Use percentiles to be less sensitive to outliers
     high_freq_idx = int(0.8 * len(dk))
     low_freq_idx = int(0.2 * len(dk))
-    
+
     eps_inf = np.median(dk[high_freq_idx:]) if high_freq_idx < len(dk) else dk[-1]
     eps_s = np.median(dk[:low_freq_idx]) if low_freq_idx > 0 else dk[0]
-    
+
     # Ensure physical constraints
     eps_inf = max(1.0, eps_inf)
     eps_s = max(eps_inf + 0.1, eps_s)  # eps_s should be > eps_inf
-    
+
     total_delta_eps = eps_s - eps_inf
 
     # Initialize parameters dictionary
@@ -890,7 +896,7 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_see
     if n_poles == 1:
         # Single pole case - use Cole-Cole transformation
         tau_cc = estimate_tau_cole_cole(f_ghz, complex_epsilon, eps_inf, eps_s)
-        
+
         if tau_cc is not None:
             params['tau_0'] = tau_cc
         else:
@@ -898,14 +904,14 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_see
             max_loss_idx = np.argmax(-np.imag(complex_epsilon))
             f_max = f_ghz[max_loss_idx]
             params['tau_0'] = 1 / (2 * np.pi * f_max * 1e9)
-        
+
         params['delta_eps_0'] = total_delta_eps
-        
+
     else:
         # Multiple poles case
         # Try to find actual peak frequencies
         peak_freqs = find_loss_peaks_advanced(f_ghz, complex_epsilon, n_poles)
-        
+
         if len(peak_freqs) >= n_poles:
             # Use detected peaks for tau values
             for i in range(n_poles):
@@ -915,29 +921,34 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_see
             # Fallback to logarithmic spacing, but biased toward detected peaks
             f_min = f_ghz[0] if len(f_ghz) > 0 else 0.1
             f_max = f_ghz[-1] if len(f_ghz) > 0 else 100.0
-            
+
             if peak_freqs:
                 # Use detected peaks as anchors
                 f_min = min(f_min, min(peak_freqs) * 0.3)
                 f_max = max(f_max, max(peak_freqs) * 3.0)
-            
+
             # Create tau values with some randomization to avoid local minima
             log_f_min = np.log10(f_min)
             log_f_max = np.log10(f_max)
-            
+
             # Add small random perturbations to help optimizer
             log_f_poles = np.linspace(log_f_min, log_f_max, n_poles)
             log_f_poles += np.random.uniform(-0.1, 0.1, n_poles) * (log_f_max - log_f_min) / n_poles
             f_poles = 10**log_f_poles
-            
+
             # Assign parameters
             for i in range(n_poles):
                 params[f'tau_{i}'] = 1 / (2 * np.pi * f_poles[i] * 1e9)
-                
-                # Vary delta_eps slightly to help optimizer
+
+                                # Vary delta_eps slightly to help optimizer
                 variation = 1.0 + np.random.uniform(-0.2, 0.2)
                 params[f'delta_eps_{i}'] = (total_delta_eps / n_poles) * variation
-        
+
+        # Clamp individual delta_eps values to prevent negative values before normalization
+        min_delta_eps = 0.05 * total_delta_eps / n_poles
+        for i in range(n_poles):
+            params[f'delta_eps_{i}'] = max(min_delta_eps, params[f'delta_eps_{i}'])
+
         # Ensure sum of delta_eps equals total
         sum_delta = sum(params[f'delta_eps_{i}'] for i in range(n_poles))
         if sum_delta > 0:
@@ -991,7 +1002,7 @@ def calculate_model(params_dict, f_ghz):
     # Add each Debye pole
     for i in range(n_poles):
         delta_eps = params_dict.get(f'delta_eps_{i}', 0)
-        
+
         # Handle both log_tau and tau parameters for compatibility
         if f'log_tau_{i}' in params_dict:
             tau = 10 ** params_dict[f'log_tau_{i}']
@@ -1007,24 +1018,24 @@ def calculate_model(params_dict, f_ghz):
 def residual(params, f_ghz, complex_epsilon_data, n_poles):
     """Residual function for Multi-Pole Debye model with heteroscedastic weighting."""
     global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
-    
+
     p_dict = params.valuesdict()
     p_dict['n_poles'] = n_poles
     model_epsilon = calculate_model(p_dict, f_ghz)
-    
+
     # Calculate and store scaling factors on first call
     if global_scale_real is None:
         global_scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
         global_scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
-    
+
     # Calculate unweighted residuals
     real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
     imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
-    
+
     # Apply scaling
     real_residual_scaled = real_residual / global_scale_real
     imag_residual_scaled = imag_residual / global_scale_imag
-    
+
     # Apply weights if available
     if global_weights_real is not None and global_weights_imag is not None:
         real_residual_weighted = real_residual_scaled * np.sqrt(global_weights_real)
@@ -1038,7 +1049,7 @@ def residual(params, f_ghz, complex_epsilon_data, n_poles):
 def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-12):
     """Calculate Jacobian matrix using finite differences with proper scaling."""
     global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
-    
+
     param_names = ['eps_inf']
     for i in range(n_poles):
         param_names.append(f'delta_eps_{i}')
@@ -1064,18 +1075,18 @@ def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-1
     # Apply scaling and weights
     real_base = np.real(base_model) / scale_real
     imag_base = np.imag(base_model) / scale_imag
-    
+
     if global_weights_real is not None and global_weights_imag is not None:
         real_base *= np.sqrt(global_weights_real)
         imag_base *= np.sqrt(global_weights_imag)
-    
+
     base_residual = np.concatenate([real_base, imag_base])
 
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
         if param_name in params_dict:
             param_value = params_dict[param_name]
-            
+
             # Choose appropriate step size based on parameter type
             if param_name.startswith('log_tau'):
                 # For log-tau parameters, use absolute step in log-space
@@ -1087,23 +1098,42 @@ def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-1
             else:
                 # For other parameters (eps_inf, delta_eps)
                 step = max(rel_step * abs(param_value), abs_step)
-            
+
             params_plus = params_dict.copy()
             params_plus[param_name] += step
 
             model_plus = calculate_model(params_plus, f_ghz)
             real_plus = np.real(model_plus) / scale_real
             imag_plus = np.imag(model_plus) / scale_imag
-            
+
             if global_weights_real is not None and global_weights_imag is not None:
                 real_plus *= np.sqrt(global_weights_real)
                 imag_plus *= np.sqrt(global_weights_imag)
-            
+
             residual_plus = np.concatenate([real_plus, imag_plus])
 
             jacobian[:, i] = (residual_plus - base_residual) / step
 
     return jacobian
+
+def calculate_unscaled_rss(real_residuals, imag_residuals):
+    """Calculate unscaled RSS for comparable AIC/BIC across datasets."""
+    global global_sigma_dk, global_sigma_df, global_measured_dk
+
+    # Calculate unscaled sum of squares
+    if global_sigma_dk is not None and global_sigma_df is not None:
+        # If uncertainties are provided, normalize by variance
+        # Use same variance model as weights: real by σ_dk², imag by (σ_df × Dk)²
+        real_rss = np.sum((real_residuals / global_sigma_dk)**2)
+        # For imaginary part, include Dk factor to match weighting scheme
+        dk_values = np.array(global_measured_dk) if global_measured_dk is not None else np.ones_like(imag_residuals)
+        imag_rss = np.sum((imag_residuals / (global_sigma_df * dk_values))**2)
+    else:
+        # Use unscaled residuals directly
+        real_rss = np.sum(real_residuals**2)
+        imag_rss = np.sum(imag_residuals**2)
+
+    return real_rss + imag_rss
 
 def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data, n_poles):
     """Calculate correlation matrix from Jacobian."""
@@ -1170,7 +1200,7 @@ def create_updated_report(params_dict):
     """Create an updated report with current parameters."""
     global global_f_ghz, global_complex_epsilon, global_n_poles
     global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
-    
+
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
 
@@ -1187,7 +1217,7 @@ def create_updated_report(params_dict):
 
     scaled_real_residuals = real_residuals / scale_real
     scaled_imag_residuals = imag_residuals / scale_imag
-    
+
     # Apply weights if available
     if global_weights_real is not None and global_weights_imag is not None:
         weighted_real_residuals = scaled_real_residuals * np.sqrt(global_weights_real)
@@ -1198,17 +1228,20 @@ def create_updated_report(params_dict):
 
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 1 + 2 * n_poles  # eps_inf + (delta_eps, tau) for each pole
-    chi_sqr = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
-    rss = chi_sqr
-    red_chi_sqr = rss / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
 
-    # Information criteria using weighted RSS
-    aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
-    bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
+    # Use scaled residuals for chi-square (optimization metric)
+    chi_sqr = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
+    red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+    # Use unscaled RSS for AIC/BIC (comparable across datasets)
+    unscaled_rss = calculate_unscaled_rss(real_residuals, imag_residuals)
+    aic = 2 * n_var + n_dat * np.log(unscaled_rss / n_dat) if n_dat > 0 else 0
+    bic = n_var * np.log(n_dat) + n_dat * np.log(unscaled_rss / n_dat) if n_dat > 0 else 0
 
     # Calculate correlation matrix for current parameters
     corr_matrix = calculate_correlation_matrix(params_dict, global_f_ghz, global_complex_epsilon, n_poles)
-    corr_text = format_correlation_matrix(corr_matrix, n_poles)
+    use_log_tau = any('log_tau_' in k for k in params_dict.keys())
+    corr_text = format_correlation_matrix(corr_matrix, n_poles, use_log_tau)
 
     # Create JSON data structure
     json_data = {
@@ -1219,7 +1252,8 @@ def create_updated_report(params_dict):
             "n_data_points": n_dat,
             "n_variables": n_var,
             "chi_square": chi_sqr,
-            "reduced_chi_square": red_chi_sqr
+            "reduced_chi_square": red_chi_sqr,
+            "unscaled_rss": unscaled_rss
         },
         "information_criteria": {
             "aic": aic,
@@ -1307,7 +1341,7 @@ def evaluate_current_fit(params_dict):
     """Evaluate the current fit quality and return evaluation results."""
     global global_f_ghz, global_complex_epsilon, global_n_poles
     global global_scale_real, global_scale_imag, global_weights_real, global_weights_imag
-    
+
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
 
@@ -1317,14 +1351,14 @@ def evaluate_current_fit(params_dict):
 
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-    
+
     # Use global scaling factors for consistency
     scale_real = global_scale_real if global_scale_real is not None else (np.max(np.abs(np.real(global_complex_epsilon))) or 1.0)
     scale_imag = global_scale_imag if global_scale_imag is not None else (np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0)
-    
+
     scaled_real_residuals = real_residuals / scale_real
     scaled_imag_residuals = imag_residuals / scale_imag
-    
+
     # Apply weights if available
     if global_weights_real is not None and global_weights_imag is not None:
         weighted_real_residuals = scaled_real_residuals * np.sqrt(global_weights_real)
@@ -1335,8 +1369,15 @@ def evaluate_current_fit(params_dict):
 
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 1 + 2 * n_poles
+
+    # Use scaled residuals for chi-square
     chi_sqr = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
     red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
+
+    # Use unscaled RSS for information criteria
+    unscaled_rss = calculate_unscaled_rss(real_residuals, imag_residuals)
+    aic = 2 * n_var + n_dat * np.log(unscaled_rss / n_dat) if n_dat > 0 else 0
+    bic = n_var * np.log(n_dat) + n_dat * np.log(unscaled_rss / n_dat) if n_dat > 0 else 0
 
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(params_dict, global_f_ghz, global_complex_epsilon, n_poles)
@@ -1350,7 +1391,12 @@ def evaluate_current_fit(params_dict):
             "n_data_points": n_dat,
             "n_variables": n_var,
             "chi_square": chi_sqr,
-            "reduced_chi_square": red_chi_sqr
+            "reduced_chi_square": red_chi_sqr,
+            "unscaled_rss": unscaled_rss
+        },
+        "information_criteria": {
+            "aic": aic,
+            "bic": bic
         },
         "residual_analysis": {
             "real_part": {
@@ -1420,7 +1466,7 @@ def run_analysis(csv_content, n_poles_input, method):
     global global_f_ghz, global_complex_epsilon, global_correlation_matrix
     global global_measured_dk, global_measured_df, global_n_poles
     global global_scale_real, global_scale_imag
-    
+
     # Reset scaling factors for new data
     global_scale_real = None
     global_scale_imag = None
@@ -1455,7 +1501,7 @@ def run_analysis(csv_content, n_poles_input, method):
         params.add(f'delta_eps_{i}',
                   value=initial_params[f'delta_eps_{i}'],
                   min=0,  # Physical constraint: no negative permittivity steps
-                  max=dk_data.max() - 1.0)
+                  max=max(dk_data.max() - 0.1, 0.5))  # Safe upper bound for low-ε materials
 
         # Use log-tau parameterization for better optimization
         tau_i = initial_params[f'tau_{i}']
@@ -1498,7 +1544,7 @@ def run_analysis(csv_content, n_poles_input, method):
 
     scaled_real_residuals = real_residuals / scale_real
     scaled_imag_residuals = imag_residuals / scale_imag
-    
+
     # Apply weights if available
     if global_weights_real is not None and global_weights_imag is not None:
         weighted_real_residuals = scaled_real_residuals * np.sqrt(global_weights_real)
@@ -1509,9 +1555,11 @@ def run_analysis(csv_content, n_poles_input, method):
 
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 1 + 2 * n_poles
-    rss = np.sum(weighted_real_residuals**2) + np.sum(weighted_imag_residuals**2)
-    aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
-    bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
+
+    # Use unscaled RSS for AIC/BIC to ensure comparability
+    unscaled_rss = calculate_unscaled_rss(real_residuals, imag_residuals)
+    aic = 2 * n_var + n_dat * np.log(unscaled_rss / n_dat) if n_dat > 0 else 0
+    bic = n_var * np.log(n_dat) + n_dat * np.log(unscaled_rss / n_dat) if n_dat > 0 else 0
 
     # Extract correlation matrix from fit result
     correlations_str = ""
@@ -1523,16 +1571,16 @@ def run_analysis(csv_content, n_poles_input, method):
             if not ('log_tau_ratio' in name):
                 kept_params.append(name)
                 kept_indices.append(i)
-        
+
         # Extract the submatrix for kept parameters only
         n_kept = len(kept_indices)
         filtered_covar = np.zeros((n_kept, n_kept))
         for i, idx_i in enumerate(kept_indices):
             for j, idx_j in enumerate(kept_indices):
                 filtered_covar[i, j] = result.covar[idx_i, idx_j]
-        
+
         global_correlation_matrix = filtered_covar
-        
+
         # Calculate correlations from filtered covariance matrix
         correlations_str = "\\nCorrelations (from optimization):\\n"
         for i in range(n_kept):
@@ -1601,13 +1649,13 @@ Information Criteria:
             setLoadingState(true, 'Initializing Environment...');
             try {
                 pyodide = await loadPyodide({
-                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"
+                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.27.0/full/"
                 });
                 setLoadingState(true, 'Loading Python Packages...');
                 await pyodide.loadPackage(['numpy', 'pandas', 'micropip', 'matplotlib', 'scipy']);
                 const micropip = pyodide.pyimport('micropip');
                 setLoadingState(true, 'Installing lmfit & plotly...');
-                await micropip.install(['lmfit', 'plotly']);
+                await micropip.install(['lmfit==1.3.1', 'plotly']);
                 isPyodideReady = true;
                 await pyodide.runPythonAsync(pythonScript);
                 setLoadingState(false);
@@ -1653,7 +1701,7 @@ Information Criteria:
                     <h4 class="text-sm font-semibold text-gray-700 mb-3">Pole ${i + 1}</h4>
                     <div class="space-y-4">
                         <div>
-                            <label for="delta_eps_${i}_slider" class="block text-xs font-medium text-gray-600">Δε<sub>${i}</sub></label>
+                            <label for="delta_eps_${i}_slider" class="block text-xs font-medium text-gray-600" title="Δε ≥ 0 (physical constraint)">Δε<sub>${i}</sub></label>
                             <input type="range" id="delta_eps_${i}_slider" class="mt-1">
                             <input type="number" id="delta_eps_${i}_input" class="mt-1 w-full p-1 border border-gray-300 rounded-md text-sm">
                         </div>
@@ -1672,9 +1720,9 @@ Information Criteria:
                 const tauSlider = document.getElementById(`tau_${i}_slider`);
                 const tauInput = document.getElementById(`tau_${i}_input`);
 
-                // Set up delta_eps controls (allow negative values)
+                // Set up delta_eps controls (enforce physical constraint Δε ≥ 0)
                 const deltaEps = params[`delta_eps_${i}`] || 0.5;
-                const deltaEpsMin = Math.min(-5, deltaEps * 2);
+                const deltaEpsMin = Math.min(0.1, deltaEps * 0.5); // Small positive minimum for flexibility
                 const deltaEpsMax = Math.max(5, deltaEps * 2);
                 deltaEpsSlider.min = deltaEpsMin;
                 deltaEpsSlider.max = deltaEpsMax;
@@ -1684,6 +1732,7 @@ Information Criteria:
                 deltaEpsInput.max = deltaEpsMax;
                 deltaEpsInput.step = 0.01;
                 deltaEpsInput.value = deltaEps;
+                deltaEpsInput.title = "Δε ≥ 0 (physical constraint)";
 
                 // Set up tau controls (log scale for slider)
                 const tau = params[`tau_${i}`] || 1e-9;
@@ -2065,7 +2114,7 @@ result_json
                             'insufficient_data': 'Insufficient Data'
                         };
                         const methodName = methodNames[result.detection_method] || result.detection_method;
-                        
+
                         // Add detection method info to status
                         const infoDiv = document.createElement('div');
                         infoDiv.className = 'mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm';
