@@ -639,9 +639,16 @@ def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
 
     jacobian = np.zeros((n_data, n_params))
 
+    # Dynamic-range scaling factors (consistent with residual function)
+    scale_real = np.max(np.abs(np.real(global_complex_epsilon))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0
+
     # Base model
     base_model = calculate_model(params_dict, f_ghz)
-    base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
+    base_residual = np.concatenate([
+        np.real(base_model) / scale_real,
+        np.imag(base_model) / scale_imag
+    ])
 
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
@@ -651,7 +658,10 @@ def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
         params_plus[param_name] += step
 
         model_plus = calculate_model(params_plus, f_ghz)
-        residual_plus = np.concatenate([np.real(model_plus), np.imag(model_plus)])
+        residual_plus = np.concatenate([
+            np.real(model_plus) / scale_real,
+            np.imag(model_plus) / scale_imag
+        ])
 
         jacobian[:, i] = (residual_plus - base_residual) / step
 
