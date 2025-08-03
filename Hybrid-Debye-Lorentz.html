@@ -22,6 +22,7 @@
         }
         #kpi-wrapper { transition: box-shadow .15s; }
         #kpi-wrapper:hover { box-shadow: 0 4px 12px rgb(0 0 0 / .15); }
+        
         .spinner {
             border-top-color: #3498db;
             animation: spin 1s linear infinite;
@@ -72,19 +73,84 @@
             border-radius: 4px;
             font-size: 0.875rem;
         }
+        
+        /* collapsible radar card – remove bottom padding & border when closed */
+        #radar-chart-container.collapsed {
+          padding-bottom: 0;          /* no empty space */
+          border-bottom-width: 0;     /* kill the faint line */
+        }
+        
+        /* disable hover effects when collapsed */
+        #radar-chart-container.collapsed:hover {
+          box-shadow: none !important;
+          border-bottom-width: 0 !important;
+        }
+        
+        
+        /* a smoother "slide‑up" when collapsing  */
+        #ctrl-card.collapsed {
+          max-height: 0 !important;
+          opacity: 0;
+          overflow: hidden;
+          padding: 0;
+          margin: 0;
+        }
+        
+        /* --- Diagnostics box: minimised state --------------------- */
+        #kpi-wrapper.minimised {
+          height: 36px !important;   /* override any inline height */
+          width: 180px !important;  /* override any inline width  */
+          border: 1px solid #d1d5db;      /* <‑‑ NEW: subtle gray border */
+          overflow: hidden;
+        }
+        #kpi-wrapper.minimised #kpi-content,
+        #kpi-wrapper.minimised #kpi-resize {
+          display: none !important;  /* make sure they vanish      */
+        }
+
+        /* make the resize hit‑area obvious */
+        #kpi-resize::after {
+          content: '';            /* diagonal lines */
+          position: absolute;
+          inset: 0;
+          background-image:
+            linear-gradient(135deg, transparent 0 40%, #ffffff80 40% 60%, transparent 60%);
+          background-size: 4px 4px;
+        }
+        
+        @media (max-width: 1024px){          /* laptops / tablets */
+          #kpi-wrapper{width:90vw; height:70vh;}
+        }
+        @media (max-width: 640px){           /* phones */
+          #kpi-wrapper{width:95vw; height:80vh;}
+        }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800">
 
-    <div class="container mx-auto p-4 md:p-8 max-w-7xl">
-        <header class="text-center mb-8">
+    <div class="container mx-auto p-4 md:p-6 lg:p-8 max-w-7xl">
+        <header class="text-center mb-4">
             <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Interactive Hybrid Debye-Lorentz Model Fitter</h1>
             <p class="mt-2 text-lg text-gray-600">Upload your dielectric spectroscopy data (CSV) to fit it to the Hybrid Debye-Lorentz model with N terms.</p>
         </header>
 
-        <div class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+        <!--▸ NEW wrapper --------------------------------------------------------->
+        <div id="control-panel" class="relative">
+          <!-- ▸ floating chip (hidden while expanded) -->
+          <button id="ctrl-chip"
+                  class="hidden fixed top-3 left-3 z-50
+                         bg-blue-600 text-white rounded-full px-4 py-1.5
+                         shadow-lg transition transform hover:scale-105"
+                  title="Show controls">
+              Controls
+          </button>
+
+          <!-- ▸ your existing card (upload, N‑terms, etc.) – no changes inside -->
+          <div id="ctrl-card"
+               class="bg-white rounded-xl shadow-lg p-3 md:p-4
+                      transition-all duration-200">
             <!-- Controls Section -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-center mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-center mb-3">
                 <div>
                     <label for="file-upload" class="block text-sm font-medium text-gray-700 mb-2">
                         Upload CSV File
@@ -124,6 +190,21 @@
                     </button>
                 </div>
             </div>
+            
+            <div class="flex justify-end mt-2">
+                <!-- NEW collapse icon -->
+                <button id="ctrl-collapse"
+                        class="text-gray-400 hover:text-gray-600"
+                        title="Hide controls">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5"
+                       fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                          stroke-width="2" d="M19 12H5" />
+                  </svg>
+                </button>
+            </div>
+          </div>
+        </div>
 
             <!-- Status and Output Section -->
             <div id="status" class="text-center my-4 p-4 bg-gray-50 rounded-lg hidden">
@@ -133,7 +214,7 @@
                 </div>
             </div>
 
-            <div id="output" class="hidden mt-8 h-[calc(100vh-14rem)]">
+            <div id="output" class="hidden mt-4 h-[calc(100vh-14rem)] overflow-y-auto overscroll-contain">
 
               <!-- Split container -->
               <div id="split-root" class="flex h-full w-full overflow-hidden">
@@ -142,31 +223,6 @@
                 <div id="pane-left"
                      class="relative w-[66%] min-w-[360px] flex-shrink-0 overflow-auto border-r">
                   <div id="plot-output" class="h-full"></div>
-
-                  <!-- KPI overlay -->
-                  <div id="kpi-wrapper"
-                       class="fixed top-20 right-8 w-72 space-y-3 z-40 cursor-move select-none">
-                    <div id="fit-quality-indicator" class="mb-4 p-3 rounded-lg hidden">
-                      <div class="flex items-center justify-between">
-                        <span class="text-sm font-medium">Fit Quality:</span>
-                        <span id="fit-quality-score" class="text-lg font-bold"></span>
-                      </div>
-                      <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
-                        <div id="fit-quality-bar" class="h-2 rounded-full transition-all duration-300"></div>
-                      </div>
-                    </div>
-                    <div id="radar-chart-container" class="mb-4 border border-gray-200 rounded-lg bg-gray-50 hidden">
-                      <div class="flex items-center justify-between p-3 border-b border-gray-200 cursor-pointer" id="radar-toggle">
-                        <h4 class="text-sm font-semibold text-gray-700">Metric Breakdown</h4>
-                        <svg id="radar-chevron" class="w-4 h-4 transform transition-transform text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-                        </svg>
-                      </div>
-                      <div id="radar-content" class="p-4">
-                        <div id="radar-chart" class="w-full overflow-hidden" style="height: 320px; max-width: 100%;"></div>
-                      </div>
-                    </div>
-                  </div>
                 </div>
 
                 <!-- DRAG BAR -->
@@ -174,76 +230,42 @@
                      class="w-1 bg-gray-300 cursor-col-resize hover:bg-gray-400"></div>
 
                 <!-- RIGHT PANE – parameters & scoring -->
-                <div id="pane-right" class="flex-1 overflow-auto p-6 space-y-6">
+                <div id="pane-right" class="flex-1 overflow-auto p-4 space-y-4">
 
-                  <!-- Buttons -->
-                  <div class="flex justify-end space-x-2">
-                    <button id="reset-button"
-                            class="bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded text-sm">
-                      Reset
-                    </button>
-                    <button id="download-button"
-                            class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">
-                      Download
-                    </button>
+                  <!-- ▾▾▾  in #pane‑right  ▾▾▾ -->
+                  <div class="flex justify-between items-start mb-4 space-x-4">
+
+                    <!-- A. action buttons -->
+                    <div class="flex-shrink-0 space-x-2">
+                      <button id="reset-button"
+                              class="bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded text-sm">
+                        Reset
+                      </button>
+                      <button id="download-button"
+                              class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">
+                        Download
+                      </button>
+                    </div>
+
+                    <!-- B.  Fit‑quality card (moved here) -->
+                    <div id="fit-quality-indicator"
+                         class="p-3 rounded-lg bg-blue-50 border border-blue-200 hidden
+                                w-48 flex-shrink-0">
+                      <div class="flex items-center justify-between">
+                        <span class="text-sm font-medium">Fit Quality:</span>
+                        <span id="fit-quality-score" class="text-lg font-bold"></span>
+                      </div>
+                      <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                        <div id="fit-quality-bar"
+                             class="h-2 rounded-full transition-all duration-300"></div>
+                      </div>
+                    </div>
+
                   </div>
 
                   <!-- Parameter sliders injected here -->
                   <h3 class="text-xl font-bold">Adjust Parameters</h3>
                   <div id="parameters-display" class="space-y-6"></div>
-
-                  <!-- Collapsible scoring -->
-                  <details id="scoring-prefs" class="hidden">
-                    <summary class="font-semibold cursor-pointer">
-                      Scoring priorities
-                    </summary>
-                    <div id="scoring-sliders" class="mt-4 space-y-4">
-                      <div class="slider-group">
-                        <label class="flex items-center justify-between text-xs text-gray-600">
-                          <span>Uniform Fit Across Bands</span>
-                          <span id="weight-regional_fit-value" class="font-mono">4.0</span>
-                        </label>
-                        <input type="range" id="weight-regional_fit" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                               min="0" max="5" step="0.5" value="4" />
-                      </div>
-                      <div class="slider-group">
-                        <label class="flex items-center justify-between text-xs text-gray-600">
-                          <span>Low RMS in Dk</span>
-                          <span id="weight-rms_real-value" class="font-mono">3.0</span>
-                        </label>
-                        <input type="range" id="weight-rms_real" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                               min="0" max="5" step="0.5" value="3" />
-                      </div>
-                      <div class="slider-group">
-                        <label class="flex items-center justify-between text-xs text-gray-600">
-                          <span>Low RMS in Df</span>
-                          <span id="weight-rms_imag-value" class="font-mono">3.0</span>
-                        </label>
-                        <input type="range" id="weight-rms_imag" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                               min="0" max="5" step="0.5" value="3" />
-                      </div>
-                      <div class="slider-group">
-                        <label class="flex items-center justify-between text-xs text-gray-600">
-                          <span>Chi-Square Fit</span>
-                          <span id="weight-reduced_chi_square-value" class="font-mono">2.0</span>
-                        </label>
-                        <input type="range" id="weight-reduced_chi_square" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                               min="0" max="5" step="0.5" value="2" />
-                      </div>
-                      <div class="slider-group">
-                        <label class="flex items-center justify-between text-xs text-gray-600">
-                          <span>Model Simplicity (BIC)</span>
-                          <span id="weight-bic-value" class="font-mono">2.0</span>
-                        </label>
-                        <input type="range" id="weight-bic" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
-                               min="0" max="5" step="0.5" value="2" />
-                      </div>
-                    </div>
-                    <button id="apply-scoring-prefs"
-                            class="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white py-2 text-sm rounded">
-                      Apply changes
-                    </button>
-                  </details>
 
                 </div>
               </div>
@@ -256,20 +278,111 @@
                 </div>
               </div>
             </div>
+
              <!-- Error Display -->
             <div id="error-box" class="hidden mt-6 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
                 <h3 class="font-bold">An Error Occurred</h3>
                 <p id="error-message"></p>
             </div>
         </div>
-        <footer class="text-center mt-8 text-sm text-gray-500">
-            <p>Powered by Pyodide, lmfit, and plotly</p>
-            <div class="border-t border-gray-300 pt-2 mt-2">
-            <p class="font-semibold text-gray-700">Citation</p>
-            <p class="italic">Meddeb, B., & Meddeb, A. (2025). QuickFitter: Interactive Dielectric Data Fitting Tool.
-            <br>Available at: <a href="https://github.com/bmeddeb/QuickFitter" class="text-blue-600 hover:underline">https://github.com/bmeddeb/QuickFitter</a></p>
+    </div>
+    
+    <footer class="text-center mt-8 text-sm text-gray-500">
+        <p>Powered by Pyodide, lmfit, and plotly</p>
+        <div class="border-t border-gray-300 pt-2 mt-2">
+        <p class="font-semibold text-gray-700">Citation</p>
+        <p class="italic">Meddeb, B., & Meddeb, A. (2025). QuickFitter: Interactive Dielectric Data Fitting Tool.
+        <br>Available at: <a href="https://github.com/bmeddeb/QuickFitter" class="text-blue-600 hover:underline">https://github.com/bmeddeb/QuickFitter</a></p>
         </div>
-        </footer>
+    </footer>
+
+    <!--  replace the old #kpi-wrapper  -->
+    <div id="kpi-wrapper"
+         class="fixed top-4 left-4 w-[340px] h-[560px] z-50 cursor-move
+                rounded-lg bg-white shadow-lg select-none overflow-hidden hidden">
+
+      <!-- Header bar with minimise button -->
+      <div class="flex items-center justify-between bg-gray-100 border-b
+                  px-3 py-2">
+        <h4 class="font-semibold text-sm text-gray-700">
+          Diagnostics
+        </h4>
+        <button id="kpi-toggle"
+                class="p-1 rounded hover:bg-gray-200 focus:outline-none">
+          <!-- simple minus/plus icon -->
+          <svg id="kpi-icon" class="w-4 h-4" fill="none" stroke="currentColor"
+               viewBox="0 0 24 24">
+            <path id="kpi-icon-path" stroke-linecap="round" stroke-linejoin="round"
+                  stroke-width="2" d="M5 12h14"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- scrollable content (Metric radar & sliders) -->
+      <div id="kpi-content" class="p-3 overflow-y-auto space-y-6" style="height: calc(100% - 44px);">
+
+        <!-- 2‑A  Radar chart -->
+        <div id="radar-chart-container"
+             class="border border-gray-200 rounded-lg bg-gray-50">
+          <div id="radar-chart" style="height:320px"></div>
+        </div>
+
+        <!-- 2‑B  Scoring priority sliders (moved from right pane) -->
+        <div id="scoring-sliders" class="space-y-4">
+          <h5 class="font-semibold text-sm text-gray-700">Scoring Priorities</h5>
+          <div class="slider-group">
+            <label class="flex items-center justify-between text-xs text-gray-600">
+              <span>Uniform Fit Across Bands</span>
+              <span id="weight-regional_fit-value" class="font-mono">4.0</span>
+            </label>
+            <input type="range" id="weight-regional_fit" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                   min="0" max="5" step="0.5" value="4" />
+          </div>
+          <div class="slider-group">
+            <label class="flex items-center justify-between text-xs text-gray-600">
+              <span>Low RMS in Dk</span>
+              <span id="weight-rms_real-value" class="font-mono">3.0</span>
+            </label>
+            <input type="range" id="weight-rms_real" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                   min="0" max="5" step="0.5" value="3" />
+          </div>
+          <div class="slider-group">
+            <label class="flex items-center justify-between text-xs text-gray-600">
+              <span>Low RMS in Df</span>
+              <span id="weight-rms_imag-value" class="font-mono">3.0</span>
+            </label>
+            <input type="range" id="weight-rms_imag" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                   min="0" max="5" step="0.5" value="3" />
+          </div>
+          <div class="slider-group">
+            <label class="flex items-center justify-between text-xs text-gray-600">
+              <span>Chi-Square Fit</span>
+              <span id="weight-reduced_chi_square-value" class="font-mono">2.0</span>
+            </label>
+            <input type="range" id="weight-reduced_chi_square" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                   min="0" max="5" step="0.5" value="2" />
+          </div>
+          <div class="slider-group">
+            <label class="flex items-center justify-between text-xs text-gray-600">
+              <span>Model Simplicity (BIC)</span>
+              <span id="weight-bic-value" class="font-mono">2.0</span>
+            </label>
+            <input type="range" id="weight-bic" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" 
+                   min="0" max="5" step="0.5" value="2" />
+          </div>
+        </div>
+
+        <button id="apply-scoring-prefs"
+                class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2
+                       text-sm rounded">
+          Apply changes
+        </button>
+      </div>
+
+      <!-- Resize handle (bottom‑right, square, always visible when not minimised) -->
+      <div id="kpi-resize"
+           class="absolute right-0 bottom-0 w-4 h-4 cursor-se-resize
+                  bg-blue-300/40 hover:bg-blue-500/60"></div>
     </div>
 
     <script type="text/javascript">
@@ -2246,36 +2359,39 @@ Convergence Details: {get_user_friendly_message(result.message)}
         }
 
         function updateFitQualityIndicator(evaluation) {
+            const wrapper = document.getElementById('kpi-wrapper');
             const indicator = document.getElementById('fit-quality-indicator');
             const scoreSpan = document.getElementById('fit-quality-score');
-            const bar = document.getElementById('fit-quality-bar');
+            const bar       = document.getElementById('fit-quality-bar');
 
-            if (!evaluation) {
-                indicator.classList.add('hidden');
-                return;
+            if (!evaluation) { 
+                indicator.classList.add('hidden'); 
+                return; 
             }
 
+            // Show the wrapper when we have evaluation data
+            wrapper.classList.remove('hidden');
+
             indicator.classList.remove('hidden');
+
             const score = evaluation.overall_score;
             const category = evaluation.overall_category;
-
             scoreSpan.textContent = `${score} (${category})`;
-
-            // Update bar width and color
             bar.style.width = `${score}%`;
 
+            // colour logic unchanged …
             if (score >= 90) {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-green-500';
-                indicator.className = 'mb-4 p-3 rounded-lg bg-green-50 border border-green-200';
+                indicator.className = 'p-3 rounded-lg bg-green-50 border border-green-200 w-48 flex-shrink-0';
             } else if (score >= 75) {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-blue-500';
-                indicator.className = 'mb-4 p-3 rounded-lg bg-blue-50 border border-blue-200';
+                indicator.className = 'p-3 rounded-lg bg-blue-50 border border-blue-200 w-48 flex-shrink-0';
             } else if (score >= 60) {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-yellow-500';
-                indicator.className = 'mb-4 p-3 rounded-lg bg-yellow-50 border border-yellow-200';
+                indicator.className = 'p-3 rounded-lg bg-yellow-50 border border-yellow-200 w-48 flex-shrink-0';
             } else {
                 bar.className = 'h-2 rounded-full transition-all duration-300 bg-red-500';
-                indicator.className = 'mb-4 p-3 rounded-lg bg-red-50 border border-red-200';
+                indicator.className = 'p-3 rounded-lg bg-red-50 border border-red-200 w-48 flex-shrink-0';
             }
 
             // Update radar chart
@@ -2337,9 +2453,9 @@ Convergence Details: {get_user_friendly_message(result.message)}
                 },
                 showlegend: false,
                 margin: { t: 30, b: 30, l: 30, r: 30 },
-                font: { size: 9 },
+                font: { size: 10 },
                 width: undefined,
-                height: 280
+                height: 560
             };
 
             try {
@@ -2506,6 +2622,11 @@ Convergence Details: {get_user_friendly_message(result.message)}
                 plotOutput.innerHTML = '';
                 Plotly.newPlot('plot-output', plotData.data, plotData.layout, {responsive: true});
 
+                /* Tell Plotly to re‑measure once flexbox has settled */
+                requestAnimationFrame(() => {
+                  Plotly.Plots.resize(document.getElementById('plot-output'));
+                });
+
                 reportOutput.textContent = result.report;
                 displayParameters(result.fitted_params, n_terms);
 
@@ -2515,6 +2636,9 @@ Convergence Details: {get_user_friendly_message(result.message)}
                 }
 
                 outputDiv.classList.remove('hidden');
+
+                /* NEW – collapse the controls right now  */
+                document.getElementById('ctrl-collapse').click();
 
             } catch (err) {
                 console.error(err);
@@ -2663,6 +2787,21 @@ Convergence Details: {get_user_friendly_message(result.message)}
           const wrapper   = document.getElementById('kpi-wrapper');
           if (!wrapper) return;
 
+          // Restore position and size from localStorage on startup
+          const pos = JSON.parse(localStorage.getItem('kpiPos') || '{}');
+          if (pos.left) wrapper.style.left = pos.left;
+          if (pos.top)  wrapper.style.top  = pos.top;
+
+          const sz = JSON.parse(localStorage.getItem('kpiSize') || '{}');
+          if (sz.w) { wrapper.style.width = sz.w + 'px'; }
+          if (sz.h) {
+            wrapper.style.height = sz.h + 'px';
+            const radarChart = document.getElementById('radar-chart');
+            if (radarChart) {
+              radarChart.style.height = Math.max(200, sz.h - 180) + 'px';
+            }
+          }
+
           let startX, startY, startLeft, startTop, dragging = false;
 
           const getPos = e => ({
@@ -2671,9 +2810,11 @@ Convergence Details: {get_user_friendly_message(result.message)}
           });
 
           const startDrag = e => {
-            // Allow Plotly interactions inside the radar chart and toggle clicks – drag only if user
+            // Allow Plotly interactions inside the radar chart, toggle clicks, and resize handles – drag only if user
             // begins on the wrapper itself (not on an inner canvas/element)
-            if (e.target.closest('#radar-chart') || e.target.closest('#radar-toggle')) return;
+            if (e.target.closest('#radar-chart') || 
+                e.target.closest('#kpi-toggle') || 
+                e.target.closest('#kpi-resize')) return;
 
             const p   = getPos(e);
             const box = wrapper.getBoundingClientRect();
@@ -2718,6 +2859,10 @@ Convergence Details: {get_user_friendly_message(result.message)}
             document.removeEventListener('mouseup',   stopDrag);
             document.removeEventListener('touchmove', onDrag);
             document.removeEventListener('touchend',  stopDrag);
+            
+            // Persist position after user lets go
+            localStorage.setItem('kpiPos', JSON.stringify({left: wrapper.style.left, top: wrapper.style.top}));
+            
             // Ensure the radar chart reflows if width changed
             Plotly.Plots.resize(document.getElementById('radar-chart'));
           };
@@ -2726,33 +2871,163 @@ Convergence Details: {get_user_friendly_message(result.message)}
           wrapper.addEventListener('touchstart', startDrag, { passive:false });
         })();
 
-        // ── collapsible radar chart ─────────────────────────────────────────────
+
+        // ── resizable KPI wrapper ─────────────────────────────────────────────
         (function () {
-          const toggle = document.getElementById('radar-toggle');
-          const content = document.getElementById('radar-content');
-          const chevron = document.getElementById('radar-chevron');
-          
-          if (!toggle || !content || !chevron) return;
-          
-          let isCollapsed = false;
-          
-          toggle.addEventListener('click', (e) => {
-            // Don't trigger drag when clicking toggle
+          const wrapper = document.getElementById('kpi-wrapper');
+          const radarChart = document.getElementById('radar-chart');
+          if (!wrapper || !radarChart) return;
+
+          let isResizing = false;
+          let resizeType = '';
+          let startX, startY, startWidth, startHeight, startTop;
+
+          const getPos = e => ({
+            x: e.touches ? e.touches[0].clientX : e.clientX,
+            y: e.touches ? e.touches[0].clientY : e.clientY
+          });
+
+          // Start resize
+          const startResize = (e, type) => {
+            if (wrapper.classList.contains('minimised')) return;   // don't resize when minimised
+            
+            e.preventDefault();
             e.stopPropagation();
             
-            isCollapsed = !isCollapsed;
+            isResizing = true;
+            resizeType = type;
             
-            if (isCollapsed) {
-              content.style.display = 'none';
-              chevron.style.transform = 'rotate(-90deg)';
+            const pos = getPos(e);
+            const rect = wrapper.getBoundingClientRect();
+            
+            startX = pos.x;
+            startY = pos.y;
+            startWidth  = rect.width;
+            startHeight = rect.height;
+            startTop    = rect.top;
+            
+            document.addEventListener('mousemove', onResize);
+            document.addEventListener('mouseup', stopResize);
+            document.addEventListener('touchmove', onResize, { passive: false });
+            document.addEventListener('touchend', stopResize);
+            
+            wrapper.classList.add('opacity-90');
+          };
+
+          // Resize handler
+          const onResize = e => {
+            if (!isResizing) return;
+            e.preventDefault();
+            
+            const pos = getPos(e);
+            const dx = pos.x - startX;
+            const dy = pos.y - startY;
+            
+            let w = startWidth;
+            let h = startHeight;
+            
+            // Calculate new dimensions based on resize type
+            if (resizeType.includes('e')) w = Math.max(220, startWidth + dx);
+            if (resizeType.includes('s')) {
+              h = Math.max(180, startHeight + dy);
+              wrapper.style.height = h + 'px';
+              radarChart.style.height = Math.max(200, h - 180) + 'px';
+            }
+
+            wrapper.style.width = w + 'px';
+            
+            /* live Plotly redraw – throttled */
+            window.requestAnimationFrame(() => Plotly.Plots.resize(radarChart));
+          };
+
+          // Stop resize
+          const stopResize = () => {
+            isResizing = false;
+            resizeType = '';
+            
+            document.removeEventListener('mousemove', onResize);
+            document.removeEventListener('mouseup', stopResize);
+            document.removeEventListener('touchmove', onResize);
+            document.removeEventListener('touchend', stopResize);
+            
+            wrapper.classList.remove('opacity-90');
+            
+            // Persist size after user lets go
+            localStorage.setItem('kpiSize', JSON.stringify({w: wrapper.offsetWidth, h: wrapper.offsetHeight}));
+            
+            // Resize Plotly chart to fit new container
+            setTimeout(() => {
+              Plotly.Plots.resize(radarChart);
+            }, 100);
+          };
+
+          // Attach listeners to resize handle
+          const resizeHandle = document.getElementById('kpi-resize');
+          resizeHandle?.addEventListener('mousedown', e => startResize(e, 'se'));
+          resizeHandle?.addEventListener('touchstart', e => startResize(e, 'se'), {passive:false});
+        })();
+        
+        // ── collapsible control panel ─────────────────────────────────────────────
+        (function () {
+          const card      = document.getElementById('ctrl-card');
+          const chip      = document.getElementById('ctrl-chip');
+          const collapse  = document.getElementById('ctrl-collapse');
+          const runBtn    = document.getElementById('run-button');
+
+          /* hide card – show chip */
+          function collapseControls () {
+            card.classList.add('collapsed');
+            /* delay 'hidden' so the transition can finish */
+            setTimeout(() => card.classList.add('hidden'), 180);
+            chip.classList.remove('hidden');
+          }
+
+          /* show card – hide chip */
+          function expandControls () {
+            card.classList.remove('hidden');
+            /* force reflow so transition plays every time */
+            void card.offsetWidth;
+            card.classList.remove('collapsed');
+            chip.classList.add('hidden');
+          }
+
+          /* manual toggle */
+          collapse.addEventListener('click', collapseControls);
+          chip.addEventListener('click', expandControls);
+        })();
+        
+        // ── minimize/restore Diagnostics box ─────────────────────────────────────────────
+        (function () {
+          const wrapper   = document.getElementById('kpi-wrapper');
+          const toggleBtn = document.getElementById('kpi-toggle');
+          const iconPath  = document.getElementById('kpi-icon-path');
+
+          toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+
+            const minimised = wrapper.classList.toggle('minimised');
+
+            /* store → clear inline size */
+            if (minimised) {
+              wrapper.dataset.prevW = wrapper.style.width  || '';
+              wrapper.dataset.prevH = wrapper.style.height || '';
+              wrapper.style.width  = '';
+              wrapper.style.height = '';
             } else {
-              content.style.display = 'block';
-              chevron.style.transform = 'rotate(0deg)';
-              // Resize Plotly chart when expanded
+              /* restore previous size (if any) */
+              if (wrapper.dataset.prevW) wrapper.style.width  = wrapper.dataset.prevW;
+              if (wrapper.dataset.prevH) wrapper.style.height = wrapper.dataset.prevH;
+              /* give Plotly a tick to reflow */
               setTimeout(() => {
                 Plotly.Plots.resize(document.getElementById('radar-chart'));
               }, 100);
             }
+
+            /* swap icon */
+            iconPath.setAttribute(
+              'd',
+              minimised ? 'M12 5v14m-7-7h14' : 'M5 12h14'
+            );
           });
         })();
     </script>
