@@ -613,7 +613,7 @@ def load_data(csv_content):
 
 # The extra kwargs let us reuse the function elsewhere
 def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles,
-                     max_iter=120, method='leastsq', seed=None):
+                     max_iter=200, method='leastsq', seed=None):
     """Perform a quick fit for BIC calculation with limited iterations."""
     params = Parameters()
 
@@ -649,14 +649,24 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles,
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon, n_poles))
     result = minimizer.minimize(method=method, max_nfev=max_iter)
 
+    # Fallback to Nelder-Mead if first method fails
+    if not result.success:
+        result = minimizer.minimize(method='nelder', max_nfev=max_iter)
+
     # Calculate BIC using unscaled residuals
     # Get model prediction
     fitted_epsilon = calculate_model(result.params.valuesdict(), f_ghz)
     real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon)
     imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon)
 
-    # Calculate unscaled RSS for comparable BIC
-    unscaled_rss = calculate_unscaled_rss(real_residuals, imag_residuals)
+    # --- scale residuals exactly as in optimisation ---
+    scale_real = np.max(np.abs(np.real(complex_epsilon))) or 1.0
+    scale_imag = np.max(np.abs(np.imag(complex_epsilon))) or 1.0
+
+    real_resid  = real_residuals / scale_real
+    imag_resid  = imag_residuals / scale_imag
+
+    unscaled_rss = np.sum(real_resid**2) + np.sum(imag_resid**2)
 
     n_data = len(real_residuals) + len(imag_residuals)
     n_params = n_poles * 2 + 1  # delta_eps and tau for each pole, plus eps_inf
@@ -664,29 +674,36 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles,
     if n_data > 0 and unscaled_rss > 0:
         bic = n_params * np.log(n_data) + n_data * np.log(unscaled_rss / n_data)
     else:
-        bic = np.inf
+        bic = 1e6  # Large but finite value for failed fits
 
-    return {'bic': bic, 'params': result.params.valuesdict(), 'rss': unscaled_rss}
+    # Ensure BIC is finite for JSON serialization
+    if np.isinf(bic) or np.isnan(bic):
+        bic = 1e6
+
+    return {'bic': float(bic), 'params': result.params.valuesdict(), 'rss': float(unscaled_rss)}
 
 # Try multiple seeds and retain the best BIC for each n
 def select_poles_bic(f_ghz, complex_epsilon, max_poles=4, n_starts=4):
     """Select optimal number of poles using Bayesian Information Criterion."""
-    bic_best, best_n = np.inf, 1
+    bic_best, best_n = 1e6, 1  # Use finite values to avoid JSON issues
     bic_values = {}
 
     for n in range(1, max_poles + 1):
-        best_bic_n = np.inf
+        best_bic_n = 1e6  # Use finite values to avoid JSON issues
         for k in range(n_starts):
             try:
                 ini = estimate_initial_parameters(
                     f_ghz, complex_epsilon, n, random_seed=np.random.randint(1e6))
                 fit = quick_single_fit(f_ghz, complex_epsilon, ini, n,
-                                       max_iter=120, method='nelder', seed=k)
+                                       max_iter=200, method='nelder', seed=k)
                 best_bic_n = min(best_bic_n, fit['bic'])
             except Exception:
                 continue
+        # Handle infinite BIC values for JSON serialization
+        if np.isinf(best_bic_n) or np.isnan(best_bic_n):
+            best_bic_n = 1e6  # Large but finite value for failed fits
         bic_values[n] = best_bic_n
-        if best_bic_n < bic_best - 2:
+        if best_bic_n < bic_best - 6:    # "strong" evidence threshold (Kass & Raftery, 1995)
             bic_best, best_n = best_bic_n, n
 
     logger.info(f"BIC values: {bic_values}")
