@@ -524,8 +524,9 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
     # eps_inf is typically the high-frequency limit
     eps_inf_init = dk[-1] if len(dk) > 0 else 1.0
 
-    # Divide frequency range into n_terms sections
-    f_sections = np.array_split(f_ghz, n_terms)
+    # Frequency range for decoupled parameter estimation
+    f_min = f_ghz.min() if len(f_ghz) > 0 else 0.1
+    f_max = f_ghz.max() if len(f_ghz) > 0 else 100.0
 
     params = {'eps_inf': eps_inf_init}
 
@@ -534,20 +535,26 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
         delta_eps_total = dk[0] - dk[-1] if len(dk) > 0 else 1.0
         A_init = delta_eps_total / n_terms
 
-        # Initial relaxation time - spread logarithmically across frequency range
-        if len(f_sections[i]) > 0:
-            f_center = np.median(f_sections[i])
-            tau_init = 1 / (2 * np.pi * f_center * 1e9)
-        else:
-            tau_init = 1e-10 * (10 ** i)  # Logarithmic spacing
+        # Decouple omega0 and tau_D initial estimates:
+        # 1. Space omega0 logarithmically between spectral edges
+        log_f_min = np.log10(f_min)
+        log_f_max = np.log10(f_max)
+        log_f_omega0 = log_f_min + (i + 0.5) * (log_f_max - log_f_min) / n_terms
+        f_omega0 = 10 ** log_f_omega0
+        omega0_init = 2 * np.pi * f_omega0 * 1e9
+
+        # 2. Choose tau_D shifted by half a decade from omega0 frequency
+        log_f_tau = log_f_omega0 + 0.5  # Half decade higher frequency (shorter time)
+        f_tau = 10 ** log_f_tau
+        tau_init = 1 / (2 * np.pi * f_tau * 1e9)
 
         # Add six independent seed values for each term
         params[f'delta_eps_D{i+1}'] = A_init / 2
         params[f'tau_D{i+1}'] = tau_init
         params[f'alpha{i+1}'] = 0.8
         params[f'delta_eps_L{i+1}'] = A_init / 2
-        params[f'omega0{i+1}'] = 2 * np.pi * f_center * 1e9 if len(f_sections[i]) > 0 else 2 * np.pi * 1e9 * (10 ** i)
-        params[f'gamma{i+1}'] = 0.05 * params[f'omega0{i+1}']
+        params[f'omega0{i+1}'] = omega0_init
+        params[f'gamma{i+1}'] = omega0_init / 100  # More robust initial guess
 
     return params
 
@@ -636,8 +643,9 @@ def calculate_jacobian(params_dict, f_ghz, n_terms):
     base_model = calculate_hybrid_model(params_dict, f_ghz, n_terms)
     base_residual = np.concatenate([np.real(base_model), np.imag(base_model)])
 
-    # Calculate derivatives with relative step
-    h_vec = np.array([max(1e-8, abs(params_dict[param_name]) * 1e-6) for param_name in param_names])
+    # Calculate derivatives with robust step calculation to avoid machine precision issues
+    eps = np.finfo(float).eps
+    h_vec = np.array([eps**0.5 * max(abs(params_dict[param_name]), 1) for param_name in param_names])
 
     for i, param_name in enumerate(param_names):
         params_plus = params_dict.copy()
@@ -657,14 +665,13 @@ def calculate_correlation_matrix(params_dict, f_ghz, n_terms):
         # Calculate Jacobian
         J = calculate_jacobian(params_dict, f_ghz, n_terms)
 
-        # Calculate covariance matrix: (J^T J)^-1
+        # Calculate covariance matrix using eigenvalue clipping for robust regularization
         JTJ = np.dot(J.T, J)
 
-        # Improved correlation regularization - scale relative to matrix magnitude
-        JTJ += np.eye(JTJ.shape[0]) * np.max(np.diag(JTJ)) * 1e-8
-
-        # Calculate covariance
-        cov_matrix = np.linalg.inv(JTJ)
+        # Use eigenvalue clipping for regularization (robust to parameter scaling)
+        s, U = np.linalg.eigh(JTJ)
+        s_reg = np.clip(s, s.max() * 1e-8, None)
+        cov_matrix = (U / s_reg) @ U.T
 
         # Convert to correlation matrix
         std_devs = np.sqrt(np.diag(cov_matrix))
@@ -789,11 +796,11 @@ def run_analysis(csv_content, n_terms, method):
     # Add parameters for each term with new 6-parameter model
     for i in range(n_terms):
         params.add(f'delta_eps_D{i+1}', value=initial_params[f'delta_eps_D{i+1}'], min=0, max=dk_data.max())
-        params.add(f'tau_D{i+1}', value=initial_params[f'tau_D{i+1}'], min=1e-13, max=1e-6)
+        params.add(f'tau_D{i+1}', value=initial_params[f'tau_D{i+1}'], min=1e-15, max=1e-6)
         params.add(f'alpha{i+1}', value=initial_params[f'alpha{i+1}'], min=0.1, max=1.0)
         params.add(f'delta_eps_L{i+1}', value=initial_params[f'delta_eps_L{i+1}'], min=0, max=dk_data.max())
         params.add(f'omega0{i+1}', value=initial_params[f'omega0{i+1}'], min=2*np.pi*f_ghz.min()*1e9, max=2*np.pi*f_ghz.max()*1e9)
-        params.add(f'gamma{i+1}', value=initial_params[f'gamma{i+1}'], min=1e7, max=initial_params[f'omega0{i+1}']*0.5)
+        params.add(f'gamma{i+1}', value=initial_params[f'gamma{i+1}'], min=1e7, max=initial_params[f'omega0{i+1}'])
 
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_terms))
     result = minimizer.minimize(method=method)
@@ -1025,7 +1032,7 @@ Message: {result.message}
                         </div>
                         <!-- Debye tau parameter -->
                         <div>
-                            <div class="text-xs text-gray-600 mb-1">τ<sub>D,${i+1}</sub> (Debye relaxation time)</div>
+                            <div class="text-xs text-gray-600 mb-1">τ<sub>D,${i+1}</sub> (Debye relaxation time, s)</div>
                             <input type="range" id="tau_D${i+1}_slider" class="w-full">
                             <div class="flex items-center justify-between">
                                 <input type="number" id="tau_D${i+1}_input" class="param-input" step="1e-14">
@@ -1052,7 +1059,7 @@ Message: {result.message}
                         </div>
                         <!-- omega0 parameter -->
                         <div>
-                            <div class="text-xs text-gray-600 mb-1">ω<sub>0,${i+1}</sub> (Resonance frequency)</div>
+                            <div class="text-xs text-gray-600 mb-1">ω<sub>0,${i+1}</sub> (Resonance frequency, rad/s)</div>
                             <input type="range" id="omega0${i+1}_slider" class="w-full">
                             <div class="flex items-center justify-between">
                                 <input type="number" id="omega0${i+1}_input" class="param-input" step="1e7">
@@ -1061,7 +1068,7 @@ Message: {result.message}
                         </div>
                         <!-- gamma parameter -->
                         <div>
-                            <div class="text-xs text-gray-600 mb-1">γ<sub>${i+1}</sub> (Damping parameter)</div>
+                            <div class="text-xs text-gray-600 mb-1">γ<sub>${i+1}</sub> (Damping parameter, rad/s)</div>
                             <input type="range" id="gamma${i+1}_slider" class="w-full">
                             <div class="flex items-center justify-between">
                                 <input type="number" id="gamma${i+1}_input" class="param-input" step="1e7">
@@ -1116,9 +1123,9 @@ Message: {result.message}
                 // tau_D parameter (logarithmic scale)
                 const tau_D_val = params[`tau_D${i+1}`];
                 const tau_D_range = {
-                    min: 1e-13,
+                    min: 1e-15,
                     max: 1e-6,
-                    step: 1e-14,
+                    step: 1e-15,
                     logScale: true
                 };
                 setControlValues(`tau_D${i+1}`, tau_D_val, tau_D_range);
@@ -1246,7 +1253,7 @@ Message: {result.message}
                 const tauDControl = paramControls[`tau_D${i+1}`];
                 if (tauDControl) {
                     tauDControl.slider.addEventListener('input', (e) => {
-                        const logMin = Math.log10(1e-13);
+                        const logMin = Math.log10(1e-15);
                         const logMax = Math.log10(1e-6);
                         const logValue = logMin + (e.target.value / 100) * (logMax - logMin);
                         const value = Math.pow(10, logValue);
@@ -1257,7 +1264,7 @@ Message: {result.message}
 
                     tauDControl.input.addEventListener('input', (e) => {
                         const value = parseFloat(e.target.value);
-                        const logMin = Math.log10(1e-13);
+                        const logMin = Math.log10(1e-15);
                         const logMax = Math.log10(1e-6);
                         const logValue = Math.log10(value);
                         tauDControl.slider.value = ((logValue - logMin) / (logMax - logMin)) * 100;
@@ -1333,21 +1340,22 @@ Message: {result.message}
                 params[`gamma${i+1}`] = parseFloat(paramControls[`gamma${i+1}`].input.value);
             }
 
+            // Initialize proxy variables for cleanup
+            let pyParams = null;
+            let pyFGhz = null;
+            let modelProxy = null;
+
             try {
                 // Update Plot
                 const calculateFunc = pyodide.globals.get('calculate_hybrid_model');
                 // Convert params to Python dict using pyodide
-                const pyParams = pyodide.toPy(params);
-                const pyFGhz = pyodide.toPy(currentData.f_ghz);
-                const modelProxy = calculateFunc(pyParams, pyFGhz, n_terms);
+                pyParams = pyodide.toPy(params);
+                pyFGhz = pyodide.toPy(currentData.f_ghz);
+                modelProxy = calculateFunc(pyParams, pyFGhz, n_terms);
 
                 // Convert complex array properly
                 const real = pyodide.globals.get('np').real(modelProxy).toJs();
                 const imag = pyodide.globals.get('np').imag(modelProxy).toJs();
-
-                modelProxy.destroy();
-                pyParams.destroy();
-                pyFGhz.destroy();
 
                 const fittedDk = real;
                 const fittedDf = fittedDk.map((dk, i) => dk === 0 ? 0 : -imag[i] / dk);
@@ -1421,6 +1429,11 @@ Message: {result.message}
 
             } catch (err) {
                 console.error('Error updating UI:', err);
+            } finally {
+                // Always clean up proxy objects to prevent memory leaks
+                if (modelProxy) modelProxy.destroy();
+                if (pyParams) pyParams.destroy();
+                if (pyFGhz) pyFGhz.destroy();
             }
         }
 
@@ -1468,6 +1481,12 @@ Message: {result.message}
         async function downloadResults() {
             if (!currentData) return;
             setLoadingState(true, 'Preparing download...');
+            // Initialize proxy variables for cleanup
+            let pyParamsCSV = null;
+            let pyFGhz = null;
+            let fitted_epsilon_proxy = null;
+            let imageProxy = null;
+
             try {
                 const zip = new JSZip();
                 const baseFilename = originalFilename.replace(/\.csv$/i, '');
@@ -1489,17 +1508,21 @@ Message: {result.message}
 
                 // 1. Create Fitted Data CSV
                 const calculateFunc = pyodide.globals.get('calculate_hybrid_model');
-                const pyParamsCSV = pyodide.toPy(params);
-                const pyFGhz = pyodide.toPy(currentData.f_ghz);
-                const fitted_epsilon_proxy = calculateFunc(pyParamsCSV, pyFGhz, n_terms);
+                pyParamsCSV = pyodide.toPy(params);
+                pyFGhz = pyodide.toPy(currentData.f_ghz);
+                fitted_epsilon_proxy = calculateFunc(pyParamsCSV, pyFGhz, n_terms);
 
                 // Convert complex array properly
                 const real = pyodide.globals.get('np').real(fitted_epsilon_proxy).toJs();
                 const imag = pyodide.globals.get('np').imag(fitted_epsilon_proxy).toJs();
 
+                // Clean up these proxies immediately after use
                 fitted_epsilon_proxy.destroy();
+                fitted_epsilon_proxy = null;
                 pyParamsCSV.destroy();
+                pyParamsCSV = null;
                 pyFGhz.destroy();
+                pyFGhz = null;
 
                 let csvContent = "Frequency_GHz,fitted_Dk,fitted_Df\n";
                 currentData.f_ghz.forEach((f, i) => {
@@ -1512,9 +1535,10 @@ Message: {result.message}
                 // 2. Add Matplotlib Plot Image
                 const createPlotFunc = pyodide.globals.get('create_downloadable_plot');
                 // Pass parameters directly - let Python handle the conversion
-                const imageProxy = createPlotFunc(params, n_terms);
+                imageProxy = createPlotFunc(params, n_terms);
                 const imageData = imageProxy.toJs();
                 imageProxy.destroy();
+                imageProxy = null;
                 zip.file(`${baseFilename}_plot_hybrid.png`, imageData);
 
                 // 3. Add Report (human-readable .txt)
@@ -1556,6 +1580,11 @@ Message: {result.message}
             } catch(err) {
                 showError(`Failed to create download package: ${err}`);
             } finally {
+                // Always clean up proxy objects to prevent memory leaks
+                if (fitted_epsilon_proxy) fitted_epsilon_proxy.destroy();
+                if (pyParamsCSV) pyParamsCSV.destroy();
+                if (pyFGhz) pyFGhz.destroy();
+                if (imageProxy) imageProxy.destroy();
                 setLoadingState(false);
             }
         }

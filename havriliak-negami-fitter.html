@@ -591,35 +591,35 @@ def estimate_initial_parameters(f_ghz, complex_epsilon):
     """Estimate initial parameters for Havriliak-Negami model."""
     dk = np.real(complex_epsilon)
     df = -np.imag(complex_epsilon) / np.real(complex_epsilon)
-
+    
     # Estimate eps_inf and eps_s
     high_freq_idx = int(0.8 * len(dk))
     low_freq_idx = int(0.2 * len(dk))
-
+    
     eps_inf_init = np.median(dk[high_freq_idx:]) if high_freq_idx < len(dk) else dk[-1]
     eps_s_init = np.median(dk[:low_freq_idx]) if low_freq_idx > 0 else dk[0]
-
+    
     # Ensure physical constraints
     eps_inf_init = max(1.0, eps_inf_init)
     eps_s_init = max(eps_inf_init + 0.1, eps_s_init)
-
+    
     delta_eps_init = eps_s_init - eps_inf_init
-
+    
     # Estimate tau from peak in loss
     max_loss_idx = np.argmax(-np.imag(complex_epsilon))
     f_max = f_ghz[max_loss_idx]
     tau_init = 1 / (2 * np.pi * f_max * 1e9)
-
+    
     # Initial guess for broadening parameters
     # Start with Cole-Cole like behavior
     alpha_init = 0.9  # Slight symmetric broadening
     beta_init = 0.95   # Slight asymmetric broadening
-
+    
     # Try to estimate broadening from width of loss peak
     loss = -np.imag(complex_epsilon)
     max_loss = np.max(loss)
     half_max = max_loss / 2
-
+    
     # Find width at half maximum
     indices = np.where(loss > half_max)[0]
     if len(indices) > 1:
@@ -629,7 +629,7 @@ def estimate_initial_parameters(f_ghz, complex_epsilon):
             alpha_init = 0.7
         elif width_factor > 1.5:
             alpha_init = 0.8
-
+            
     return {
         'eps_inf': eps_inf_init,
         'delta_eps': delta_eps_init,
@@ -643,10 +643,10 @@ def calculate_model_from_params(eps_inf, delta_eps, tau, alpha, beta):
     global global_f_ghz
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-
+    
     f_ghz = global_f_ghz
     omega = 2 * np.pi * f_ghz * 1e9
-
+    
     # Havriliak-Negami model
     # ε*(ω) = ε_∞ + Δε / (1 + (jωτ)^α)^β
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -656,10 +656,10 @@ def calculate_model_from_params(eps_inf, delta_eps, tau, alpha, beta):
             jwτ = 1j * omega * tau
             denominator = (1 + jwτ**alpha)**beta
             eps_complex = eps_inf + delta_eps / denominator
-
+    
     eps_prime = np.real(eps_complex)
     eps_double_prime = -np.imag(eps_complex)
-
+    
     return json.dumps({
         "eps_prime": eps_prime.tolist(),
         "eps_double_prime": eps_double_prime.tolist()
@@ -669,7 +669,7 @@ def calculate_model(params, f_ghz):
     """Calculate HN model for optimization."""
     p = params
     omega = 2 * np.pi * f_ghz * 1e9
-
+    
     with np.errstate(divide='ignore', invalid='ignore'):
         if p['tau'] <= 0 or p['alpha'] <= 0 or p['alpha'] > 1 or p['beta'] <= 0 or p['beta'] > 1:
             return np.full_like(f_ghz, np.nan, dtype=complex)
@@ -677,21 +677,21 @@ def calculate_model(params, f_ghz):
             jwτ = 1j * omega * p['tau']
             denominator = (1 + jwτ**p['alpha'])**p['beta']
             eps_complex = p['eps_inf'] + p['delta_eps'] / denominator
-
+    
     return eps_complex
 
 def residual(params, f_ghz, complex_epsilon_data):
     """Residual function for HN model."""
     p_dict = params.valuesdict()
     model_epsilon = calculate_model(p_dict, f_ghz)
-
+    
     # Dynamic-range scaling factors
     scale_real = np.max(np.abs(np.real(complex_epsilon_data))) or 1.0
     scale_imag = np.max(np.abs(np.imag(complex_epsilon_data))) or 1.0
-
+    
     real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data)) / scale_real
     imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data)) / scale_imag
-
+    
     return np.concatenate([real_residual, imag_residual])
 
 def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
@@ -699,20 +699,20 @@ def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
     param_names = ['eps_inf', 'delta_eps', 'tau', 'alpha', 'beta']
     n_params = len(param_names)
     n_data = len(f_ghz) * 2  # real and imag parts
-
+    
     jacobian = np.zeros((n_data, n_params))
-
+    
     # Dynamic-range scaling factors
     scale_real = np.max(np.abs(np.real(global_complex_epsilon))) or 1.0
     scale_imag = np.max(np.abs(np.imag(global_complex_epsilon))) or 1.0
-
+    
     # Base model
     base_model = calculate_model(params_dict, f_ghz)
     base_residual = np.concatenate([
         np.real(base_model) / scale_real,
         np.imag(base_model) / scale_imag
     ])
-
+    
     # Calculate derivatives
     for i, param_name in enumerate(param_names):
         if param_name == 'tau':
@@ -723,18 +723,18 @@ def calculate_jacobian(params_dict, f_ghz, rel_step=1e-6, abs_step=1e-12):
             step = 1e-4
         else:
             step = rel_step * abs(params_dict[param_name]) + abs_step
-
+            
         params_plus = params_dict.copy()
         params_plus[param_name] += step
-
+        
         model_plus = calculate_model(params_plus, f_ghz)
         residual_plus = np.concatenate([
             np.real(model_plus) / scale_real,
             np.imag(model_plus) / scale_imag
         ])
-
+        
         jacobian[:, i] = (residual_plus - base_residual) / step
-
+    
     return jacobian
 
 def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
@@ -742,27 +742,27 @@ def calculate_correlation_matrix(params_dict, f_ghz, complex_epsilon_data):
     try:
         # Calculate Jacobian
         J = calculate_jacobian(params_dict, f_ghz)
-
+        
         # Calculate covariance matrix: (J^T J)^-1
         JTJ = np.dot(J.T, J)
-
+        
         # Add small regularization
         JTJ += np.eye(JTJ.shape[0]) * 1e-10
-
+        
         # Calculate covariance
         cov_matrix = np.linalg.inv(JTJ)
-
+        
         # Convert to correlation matrix
         std_devs = np.sqrt(np.diag(cov_matrix))
         corr_matrix = np.zeros_like(cov_matrix)
-
+        
         for i in range(len(std_devs)):
             for j in range(len(std_devs)):
                 if std_devs[i] > 0 and std_devs[j] > 0:
                     corr_matrix[i, j] = cov_matrix[i, j] / (std_devs[i] * std_devs[j])
                 else:
                     corr_matrix[i, j] = 0
-
+        
         return corr_matrix
     except:
         return None
@@ -771,23 +771,23 @@ def format_correlation_matrix(corr_matrix):
     """Format correlation matrix for display."""
     if corr_matrix is None:
         return "Unable to calculate correlation matrix"
-
+    
     param_names = ['eps_inf', 'delta_eps', 'tau', 'alpha', 'beta']
     result = "Correlations:\\n"
-
+    
     for i, param1 in enumerate(param_names):
         for j, param2 in enumerate(param_names):
             if j > i:  # Only show upper triangle
                 correlation = corr_matrix[i, j]
                 if abs(correlation) > 0.1:  # Only show significant correlations
                     result += f"    ({param1}, {param2}) = {correlation:+.4f}\\n"
-
+    
     return result
 
 def identify_model_type(alpha, beta):
     """Identify special cases of HN model."""
     tolerance = 0.02
-
+    
     if abs(alpha - 1) < tolerance and abs(beta - 1) < tolerance:
         return "Debye", "α ≈ 1, β ≈ 1 (Simple Debye relaxation)"
     elif abs(beta - 1) < tolerance:
@@ -802,33 +802,33 @@ def create_updated_report(eps_inf, delta_eps, tau, alpha, beta):
     global global_f_ghz, global_complex_epsilon
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-
+    
     params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'tau': tau, 'alpha': alpha, 'beta': beta}
     model_epsilon = calculate_model(params, global_f_ghz)
-
+    
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-
+    
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 5
     chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     rss = chi_sqr
     red_chi_sqr = rss / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-
+    
     # Information criteria
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
-
+    
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
     corr_text = format_correlation_matrix(corr_matrix)
-
+    
     # Identify model type
     model_type, model_desc = identify_model_type(alpha, beta)
-
+    
     # Calculate relaxation frequency
     f_relax = 1 / (2 * np.pi * tau) / 1e9 if tau > 0 else 0
-
+    
     # Create JSON data structure
     json_data = {
         "model": "Havriliak-Negami",
@@ -866,7 +866,7 @@ def create_updated_report(eps_inf, delta_eps, tau, alpha, beta):
         },
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
-
+    
     report = f"""Havriliak-Negami Fit Report
 {'=' * 50}
 Date: {datetime.now()}
@@ -883,7 +883,7 @@ Using current values (manual):
     tau       = {tau:.4e} s
     alpha     = {alpha:.4f}
     beta      = {beta:.4f}
-
+    
     f_relax   = {f_relax:.4f} GHz
 
 Fit Statistics
@@ -927,7 +927,7 @@ def create_plotly_plot(f_ghz, measured_eps, fitted_eps):
 def create_cole_cole_plot(f_ghz, measured_eps, fitted_eps):
     """Create Cole-Cole plot (ε'' vs ε')."""
     fig = go.Figure()
-
+    
     # Measured data
     fig.add_trace(go.Scatter(
         x=np.real(measured_eps),
@@ -936,7 +936,7 @@ def create_cole_cole_plot(f_ghz, measured_eps, fitted_eps):
         name='Measured',
         marker=dict(color='black', size=6)
     ))
-
+    
     # Fitted data
     fig.add_trace(go.Scatter(
         x=np.real(fitted_eps),
@@ -945,7 +945,7 @@ def create_cole_cole_plot(f_ghz, measured_eps, fitted_eps):
         name='Fitted',
         line=dict(color='red', width=2)
     ))
-
+    
     fig.update_layout(
         title="Cole-Cole Plot",
         xaxis_title="ε' (Real Permittivity)",
@@ -954,7 +954,7 @@ def create_cole_cole_plot(f_ghz, measured_eps, fitted_eps):
         template="plotly_white",
         legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
     )
-
+    
     return pio.to_json(fig)
 
 def evaluate_current_fit(eps_inf, delta_eps, tau, alpha, beta):
@@ -962,21 +962,21 @@ def evaluate_current_fit(eps_inf, delta_eps, tau, alpha, beta):
     global global_f_ghz, global_complex_epsilon
     if global_f_ghz is None:
         return json.dumps({"error": "No data loaded"})
-
+    
     params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'tau': tau, 'alpha': alpha, 'beta': beta}
     model_epsilon = calculate_model(params, global_f_ghz)
-
+    
     real_residuals = np.real(model_epsilon) - np.real(global_complex_epsilon)
     imag_residuals = np.imag(model_epsilon) - np.imag(global_complex_epsilon)
-
+    
     n_dat = len(real_residuals) + len(imag_residuals)
     n_var = 5
     chi_sqr = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     red_chi_sqr = chi_sqr / (n_dat - n_var) if (n_dat - n_var) > 0 else 0
-
+    
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(params, global_f_ghz, global_complex_epsilon)
-
+    
     # Create JSON report format
     json_report = {
         "model": "Havriliak-Negami",
@@ -1006,7 +1006,7 @@ def evaluate_current_fit(eps_inf, delta_eps, tau, alpha, beta):
         },
         "correlation_matrix": corr_matrix.tolist() if corr_matrix is not None else None
     }
-
+    
     # Evaluate the fit
     try:
         evaluator = FitEvaluator()
@@ -1016,7 +1016,7 @@ def evaluate_current_fit(eps_inf, delta_eps, tau, alpha, beta):
     except Exception as e:
         logger.warning(f"Could not evaluate fit: {e}")
         json_report['evaluation'] = None
-
+    
     return json.dumps(json_report)
 
 def create_downloadable_plot(eps_inf, delta_eps, tau, alpha, beta):
@@ -1024,12 +1024,12 @@ def create_downloadable_plot(eps_inf, delta_eps, tau, alpha, beta):
     global global_f_ghz, global_complex_epsilon
     if global_f_ghz is None:
         return None
-
+    
     params = {'eps_inf': eps_inf, 'delta_eps': delta_eps, 'tau': tau, 'alpha': alpha, 'beta': beta}
     fitted_epsilon = calculate_model(params, global_f_ghz)
-
+    
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-
+    
     ax1.plot(global_f_ghz, np.real(global_complex_epsilon), 'ko', label='Measured')
     ax1.plot(global_f_ghz, np.real(fitted_epsilon), 'r-', lw=2, label='Fitted')
     ax1.set_xlabel('Frequency (GHz)')
@@ -1037,7 +1037,7 @@ def create_downloadable_plot(eps_inf, delta_eps, tau, alpha, beta):
     ax1.set_title('Real Permittivity')
     ax1.legend()
     ax1.grid(True, alpha=0.5)
-
+    
     measured_df = -np.imag(global_complex_epsilon) / np.real(global_complex_epsilon)
     fitted_df = -np.imag(fitted_epsilon) / np.real(fitted_epsilon)
     ax2.plot(global_f_ghz, measured_df, 'ko', label='Measured')
@@ -1047,9 +1047,9 @@ def create_downloadable_plot(eps_inf, delta_eps, tau, alpha, beta):
     ax2.set_title('Loss Tangent')
     ax2.legend()
     ax2.grid(True, alpha=0.5)
-
+    
     plt.tight_layout()
-
+    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=150)
     plt.close(fig)
@@ -1060,15 +1060,15 @@ def run_analysis(csv_content, method):
     """Run the HN model fitting analysis."""
     global global_f_ghz, global_complex_epsilon, global_correlation_matrix
     global global_measured_dk, global_measured_df
-
+    
     f_ghz, complex_epsilon_data = load_data(csv_content)
-
+    
     # Store measured data globally
     global_measured_dk = np.real(complex_epsilon_data).tolist()
     global_measured_df = (-np.imag(complex_epsilon_data) / np.real(complex_epsilon_data)).tolist()
-
+    
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data)
-
+    
     if method == 'differential_evolution':
         # Use global optimizer for HN model due to parameter correlations
         bounds = [
@@ -1078,7 +1078,7 @@ def run_analysis(csv_content, method):
             (0.01, 1.0),    # alpha
             (0.01, 1.0)     # beta
         ]
-
+        
         def objective(x):
             params_dict = {
                 'eps_inf': x[0],
@@ -1093,7 +1093,7 @@ def run_analysis(csv_content, method):
             real_res = (np.real(model) - np.real(complex_epsilon_data)) / scale_real
             imag_res = (np.imag(model) - np.imag(complex_epsilon_data)) / scale_imag
             return np.sum(real_res**2) + np.sum(imag_res**2)
-
+        
         result_de = differential_evolution(objective, bounds, seed=42, maxiter=1000)
         fit_params = {
             'eps_inf': float(result_de.x[0]),
@@ -1102,7 +1102,7 @@ def run_analysis(csv_content, method):
             'alpha': float(result_de.x[3]),
             'beta': float(result_de.x[4])
         }
-
+        
     else:
         # Use lmfit for local optimization
         params = Parameters()
@@ -1112,15 +1112,15 @@ def run_analysis(csv_content, method):
         params.add('tau', value=initial_params['tau'], min=1e-15, max=1e-6)
         params.add('alpha', value=initial_params['alpha'], min=0.01, max=1.0)
         params.add('beta', value=initial_params['beta'], min=0.01, max=1.0)
-
+        
         minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data))
         result = minimizer.minimize(method=method)
-
+        
         fit_params = {p: float(v.value) for p, v in result.params.items()}
-
+    
     # Calculate fitted model
     fitted_epsilon = calculate_model(fit_params, f_ghz)
-
+    
     # Calculate statistics
     real_residuals = np.real(fitted_epsilon) - np.real(complex_epsilon_data)
     imag_residuals = np.imag(fitted_epsilon) - np.imag(complex_epsilon_data)
@@ -1129,18 +1129,18 @@ def run_analysis(csv_content, method):
     rss = np.sum(real_residuals**2) + np.sum(imag_residuals**2)
     aic = 2 * n_var + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
     bic = n_var * np.log(n_dat) + n_dat * np.log(rss / n_dat) if n_dat > 0 else 0
-
+    
     # Calculate correlation matrix
     corr_matrix = calculate_correlation_matrix(fit_params, f_ghz, complex_epsilon_data)
     global_correlation_matrix = corr_matrix
     corr_text = format_correlation_matrix(corr_matrix)
-
+    
     # Identify model type
     model_type, model_desc = identify_model_type(fit_params['alpha'], fit_params['beta'])
-
+    
     # Calculate relaxation frequency
     f_relax = 1 / (2 * np.pi * fit_params['tau']) / 1e9 if fit_params['tau'] > 0 else 0
-
+    
     # Generate report
     model_section = f"""Model and Parameters
 --------------------------------------------------
@@ -1154,14 +1154,14 @@ Using fitted values:
     tau       = {fit_params['tau']:.4e} s
     alpha     = {fit_params['alpha']:.4f}
     beta      = {fit_params['beta']:.4f}
-
+    
     f_relax   = {f_relax:.4f} GHz
 
 Information Criteria:
     AIC = {aic:.4f}
     BIC = {bic:.4f}
 """
-
+    
     # Create fit report
     if method != 'differential_evolution':
         report_content = fit_report(result).replace('[[', '').replace(']]', '')
@@ -1181,10 +1181,10 @@ Residual Analysis
 
 {corr_text}"""
         full_report = f"Havriliak-Negami Fit Report\\n{'=' * 50}\\nDate: {datetime.now()}\\n\\n{model_section}\\n\\n{stats_section}"
-
+    
     plot_json = create_plotly_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
     cole_cole_json = create_cole_cole_plot(f_ghz, complex_epsilon_data, fitted_epsilon)
-
+    
     return_data = {
         "report": full_report,
         "plot_json": plot_json,
@@ -1197,4 +1197,5 @@ Residual Analysis
         "model_type": model_type,
         "model_desc": model_desc
     }
-    return json.dumps(return_data)'
+    return json.dumps(return_data)
+`;
