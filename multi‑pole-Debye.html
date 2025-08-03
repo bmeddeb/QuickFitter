@@ -596,9 +596,9 @@ def load_data(csv_content):
             global_sigma_dk = None
             global_sigma_df = None
 
-            # Weight imaginary part by 1/Dk^2 to balance relative errors
+            # Weight imaginary part by 1/median(Dk)^2 to balance relative errors
             global_weights_real = np.ones_like(dk)
-            global_weights_imag = 1.0 / dk**2  # Weight by 1/Dk^2 for Df
+            global_weights_imag = 1.0 / (np.median(np.abs(dk))**2)  # Use median for stability
 
         # Normalize weights to have mean = 1 for each component
         global_weights_real = global_weights_real / np.mean(global_weights_real)
@@ -611,9 +611,15 @@ def load_data(csv_content):
     except Exception as e:
         raise ValueError(f"Failed to parse CSV: {e}")
 
-def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=20):
+# The extra kwargs let us reuse the function elsewhere
+def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles,
+                     max_iter=120, method='leastsq', seed=None):
     """Perform a quick fit for BIC calculation with limited iterations."""
     params = Parameters()
+
+    # Optionally change optimiser and random seed
+    if seed is not None:
+        np.random.seed(seed)
 
     # Add epsilon infinity
     dk_data = np.real(complex_epsilon)
@@ -641,7 +647,7 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=2
 
     # Quick minimization with limited iterations
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon, n_poles))
-    result = minimizer.minimize(method='leastsq', max_nfev=max_iter)
+    result = minimizer.minimize(method=method, max_nfev=max_iter)
 
     # Calculate BIC using unscaled residuals
     # Get model prediction
@@ -662,33 +668,31 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=2
 
     return {'bic': bic, 'params': result.params.valuesdict(), 'rss': unscaled_rss}
 
-def select_poles_bic(f_ghz, complex_epsilon, max_poles=4):
+# Try multiple seeds and retain the best BIC for each n
+def select_poles_bic(f_ghz, complex_epsilon, max_poles=4, n_starts=4):
     """Select optimal number of poles using Bayesian Information Criterion."""
     bic_best, best_n = np.inf, 1
     bic_values = {}
 
     for n in range(1, max_poles + 1):
-        try:
-            # Get initial parameters for n poles
-            initial_params = estimate_initial_parameters(f_ghz, complex_epsilon, n, random_seed=42)
-
-            # Perform quick fit
-            fit_result = quick_single_fit(f_ghz, complex_epsilon, initial_params, n)
-            bic = fit_result['bic']
-            bic_values[n] = bic
-
-            # Check if this model is significantly better (ΔBIC > 2)
-            if bic < bic_best - 2:
-                bic_best, best_n = bic, n
-
-        except Exception as e:
-            logger.warning(f"BIC calculation failed for {n} poles: {e}")
-            continue
+        best_bic_n = np.inf
+        for k in range(n_starts):
+            try:
+                ini = estimate_initial_parameters(
+                    f_ghz, complex_epsilon, n, random_seed=np.random.randint(1e6))
+                fit = quick_single_fit(f_ghz, complex_epsilon, ini, n,
+                                       max_iter=120, method='nelder', seed=k)
+                best_bic_n = min(best_bic_n, fit['bic'])
+            except Exception:
+                continue
+        bic_values[n] = best_bic_n
+        if best_bic_n < bic_best - 2:
+            bic_best, best_n = best_bic_n, n
 
     logger.info(f"BIC values: {bic_values}")
     logger.info(f"Selected {best_n} poles with BIC = {bic_best:.2f}")
 
-    return best_n
+    return best_n, bic_values
 
 def detect_poles_second_derivative(f_ghz, complex_epsilon):
     """Detect poles using second derivative of log(ε″)."""
@@ -739,16 +743,17 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
     eps_imag = -np.imag(complex_epsilon)
 
     if len(eps_imag) < 5:
-        return 1, "insufficient_data"
+        return 1, "insufficient_data", {}
 
     detection_method = None
 
     # Method 1: BIC-based selection (most robust)
     try:
-        n_poles_bic = select_poles_bic(f_ghz, complex_epsilon, max_poles=4)
+        n_poles_bic, bic_values = select_poles_bic(f_ghz, complex_epsilon, max_poles=4)
     except Exception as e:
         logger.warning(f"BIC method failed: {e}")
         n_poles_bic = None
+        bic_values = {}
 
     # Method 2: Second derivative of log(ε″)
     try:
@@ -766,11 +771,19 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
         else:
             smoothed = eps_imag
 
-        # Dynamic prominence based on noise level
+                # Dynamic prominence and width
         noise_level = np.std(np.diff(smoothed))
-        prominence = max(0.02 * np.max(smoothed), 3 * noise_level)
+        prominence = max(0.01 * np.max(smoothed), 2 * noise_level)
+        width      = max(1, len(smoothed)//40)
 
-        peaks, properties = find_peaks(smoothed, prominence=prominence, distance=max(1, len(smoothed)//10))
+        peaks, properties = find_peaks(smoothed, prominence=prominence,
+                                       width=width, distance=width)
+
+        # ----- NEW shoulder finder -----
+        if len(peaks) < 2:
+            d2 = np.gradient(np.gradient(smoothed))
+            zc = np.where(np.sign(d2[:-1]) != np.sign(d2[1:]))[0] + 1
+            peaks = np.unique(np.concatenate([peaks, zc]))
         n_poles_peaks = len(peaks)
 
         if n_poles_peaks == 0:
@@ -795,7 +808,7 @@ def detect_number_of_poles(f_ghz, complex_epsilon):
         detection_method = "peak_finding"
         logger.info(f"Using peak finding method: {n_poles} poles")
 
-    return n_poles, detection_method
+    return n_poles, detection_method, bic_values
 
 def estimate_tau_cole_cole(f_ghz, complex_epsilon, eps_inf=None, eps_s=None):
     """Estimate relaxation time using Cole-Cole transformation."""
@@ -964,7 +977,8 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_poles=None, random_see
                 params[f'delta_eps_{i}'] = (total_delta_eps / n_poles) * variation
 
         # Clamp individual delta_eps values to prevent negative values before normalization
-        min_delta_eps = 0.05 * total_delta_eps / n_poles
+        # Allow vanishingly small strengths; negative values are already forbidden
+        min_delta_eps = 1e-6
         for i in range(n_poles):
             params[f'delta_eps_{i}'] = max(min_delta_eps, params[f'delta_eps_{i}'])
 
@@ -1514,8 +1528,9 @@ def run_analysis(csv_content, n_poles_input, method):
 
     # Determine number of poles
     detection_method_used = None
+    bic_values = {}
     if n_poles_input == 'auto':
-        n_poles, detection_method_used = detect_number_of_poles(f_ghz, complex_epsilon_data)
+        n_poles, detection_method_used, bic_values = detect_number_of_poles(f_ghz, complex_epsilon_data)
         print(f"Auto-detected {n_poles} pole(s) using {detection_method_used} method")
     else:
         n_poles = int(n_poles_input)
@@ -1675,7 +1690,8 @@ Information Criteria:
         "measured_dk": global_measured_dk,
         "measured_df": global_measured_df,
         "n_poles": n_poles,
-        "detection_method": detection_method_used
+        "detection_method": detection_method_used,
+        "bic_values": bic_values
     }
     return json.dumps(return_data)
 `;
@@ -2142,7 +2158,7 @@ result_json
                     reportOutput.textContent = result.report;
                     setupParameterControls(result.fitted_params);
 
-                    // Show detection method if auto-detected
+                                                            // Show detection method if auto-detected
                     if (result.detection_method && result.detection_method !== 'manual') {
                         const methodNames = {
                             'BIC': 'Bayesian Information Criterion',
@@ -2152,11 +2168,37 @@ result_json
                         };
                         const methodName = methodNames[result.detection_method] || result.detection_method;
 
-                        // Add detection method info to status
-                        const infoDiv = document.createElement('div');
-                        infoDiv.className = 'mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm';
-                        infoDiv.innerHTML = `<strong>Auto-detection:</strong> ${result.n_poles} pole(s) detected using ${methodName}`;
-                        document.getElementById('controls-panel').insertBefore(infoDiv, document.getElementById('controls-panel').firstChild);
+                        let infoHTML = `<strong>Auto-detection:</strong> ${result.n_poles} pole(s) detected using ${methodName}`;
+
+                        // Add BIC values if available
+                        if (result.bic_values && Object.keys(result.bic_values).length > 0) {
+                            infoHTML += '<br><strong>BIC values:</strong> ';
+                            const bicEntries = [];
+                            for (const [poles, bic] of Object.entries(result.bic_values)) {
+                                bicEntries.push(`${poles}p: ${parseFloat(bic).toFixed(1)}`);
+                            }
+                            infoHTML += bicEntries.join(', ');
+                        }
+
+                        // Check if auto-detection div already exists
+                        let infoDiv = document.getElementById('auto-detection-info');
+                        if (infoDiv) {
+                            // Update existing div
+                            infoDiv.innerHTML = infoHTML;
+                        } else {
+                            // Create new div
+                            infoDiv = document.createElement('div');
+                            infoDiv.id = 'auto-detection-info';
+                            infoDiv.className = 'mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm';
+                            infoDiv.innerHTML = infoHTML;
+                            document.getElementById('controls-panel').insertBefore(infoDiv, document.getElementById('controls-panel').firstChild);
+                        }
+                    } else {
+                        // Remove auto-detection div if manual mode is used
+                        const existingInfoDiv = document.getElementById('auto-detection-info');
+                        if (existingInfoDiv) {
+                            existingInfoDiv.remove();
+                        }
                     }
 
                     // Show initial fit quality
