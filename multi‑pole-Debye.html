@@ -604,18 +604,21 @@ def quick_single_fit(f_ghz, complex_epsilon, initial_params, n_poles, max_iter=2
     for i in range(n_poles):
         params.add(f'delta_eps_{i}',
                   value=initial_params.get(f'delta_eps_{i}', 0.5),
-                  min=-10,
+                  min=0,  # Physical constraint
                   max=dk_data.max() - 1.0)
         
-        params.add(f'tau_{i}',
-                  value=initial_params.get(f'tau_{i}', 1e-9),
-                  min=1e-15,
-                  max=1e-6)
+        # Use log-tau parameterization
+        tau_i = initial_params.get(f'tau_{i}', 1e-9)
+        log_tau_i = np.log10(tau_i)
+        params.add(f'log_tau_{i}',
+                  value=log_tau_i,
+                  min=-15,
+                  max=-6)
     
-    # Add constraints for ordered relaxation times
+    # Add constraints for ordered relaxation times in log-space
     for i in range(1, n_poles):
-        params.add(f'tau_ratio_{i}', value=2.0, min=1.1, max=100)
-        params[f'tau_{i}'].expr = f'tau_{i-1} * tau_ratio_{i}'
+        params.add(f'log_tau_ratio_{i}', value=0.3, min=np.log10(1.1), max=2.0)
+        params[f'log_tau_{i}'].expr = f'log_tau_{i-1} + log_tau_ratio_{i}'
     
     # Quick minimization with limited iterations
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon, n_poles))
@@ -988,7 +991,12 @@ def calculate_model(params_dict, f_ghz):
     # Add each Debye pole
     for i in range(n_poles):
         delta_eps = params_dict.get(f'delta_eps_{i}', 0)
-        tau = params_dict.get(f'tau_{i}', 1e-12)
+        
+        # Handle both log_tau and tau parameters for compatibility
+        if f'log_tau_{i}' in params_dict:
+            tau = 10 ** params_dict[f'log_tau_{i}']
+        else:
+            tau = params_dict.get(f'tau_{i}', 1e-12)
 
         # Debye relaxation: Δε / (1 + jωτ)
         denominator = 1 + 1j * omega * tau
@@ -1033,7 +1041,12 @@ def calculate_jacobian(params_dict, f_ghz, n_poles, rel_step=1e-6, abs_step=1e-1
     
     param_names = ['eps_inf']
     for i in range(n_poles):
-        param_names.extend([f'delta_eps_{i}', f'tau_{i}'])
+        param_names.append(f'delta_eps_{i}')
+        # Use log_tau if available, otherwise tau
+        if f'log_tau_{i}' in params_dict:
+            param_names.append(f'log_tau_{i}')
+        else:
+            param_names.append(f'tau_{i}')
 
     n_params = len(param_names)
     n_data = len(f_ghz) * 2  # real and imag parts
@@ -1419,27 +1432,40 @@ def run_analysis(csv_content, n_poles_input, method):
 
     # Add poles
     for i in range(n_poles):
-        # Relaxation strength (allow negative for anomalous dispersion)
+        # Relaxation strength - enforce physical constraint (min=0)
         params.add(f'delta_eps_{i}',
                   value=initial_params[f'delta_eps_{i}'],
-                  min=-10,
+                  min=0,  # Physical constraint: no negative permittivity steps
                   max=dk_data.max() - 1.0)
 
-        # Relaxation time
-        params.add(f'tau_{i}',
-                  value=initial_params[f'tau_{i}'],
-                  min=1e-15,
-                  max=1e-6)
+        # Use log-tau parameterization for better optimization
+        tau_i = initial_params[f'tau_{i}']
+        log_tau_i = np.log10(tau_i)
+        params.add(f'log_tau_{i}',
+                  value=log_tau_i,
+                  min=-15,  # 10^-15 seconds
+                  max=-6)   # 10^-6 seconds
 
-    # Add constraints to order relaxation times (tau_0 < tau_1 < tau_2 ...)
+    # Add constraints to order relaxation times using log-space
+    # log_tau_i = log_tau_{i-1} + log_ratio_i where log_ratio >= log10(1.1)
     for i in range(1, n_poles):
-        params.add(f'tau_ratio_{i}', value=2.0, min=1.1, max=100)
-        params[f'tau_{i}'].expr = f'tau_{i-1} * tau_ratio_{i}'
+        params.add(f'log_tau_ratio_{i}', value=0.3, min=np.log10(1.1), max=2.0)
+        params[f'log_tau_{i}'].expr = f'log_tau_{i-1} + log_tau_ratio_{i}'
 
     minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_poles))
     result = minimizer.minimize(method=method)
 
-    fit_params = {p: float(v.value) for p, v in result.params.items() if not p.startswith('tau_ratio')}
+    # Extract fitted parameters, converting log_tau back to tau
+    fit_params = {}
+    for p, v in result.params.items():
+        if p.startswith('log_tau_ratio'):
+            continue  # Skip log_tau_ratio parameters
+        elif p.startswith('log_tau_'):
+            # Convert log_tau back to tau
+            pole_idx = p.split('_')[-1]
+            fit_params[f'tau_{pole_idx}'] = float(10 ** v.value)
+        else:
+            fit_params[p] = float(v.value)
     fit_params['n_poles'] = n_poles
 
     # Calculate AIC and BIC using consistent scaling and weights
@@ -1475,11 +1501,14 @@ def run_analysis(csv_content, n_poles_input, method):
         correlations_str = "\\nCorrelations (from optimization):\\n"
         for i, name1 in enumerate(result.var_names):
             for j, name2 in enumerate(result.var_names):
-                if j > i and not ('tau_ratio' in name1 or 'tau_ratio' in name2):
+                if j > i and not ('log_tau_ratio' in name1 or 'log_tau_ratio' in name2):
                     try:
                         corr_val = result.covar[i, j] / np.sqrt(result.covar[i, i] * result.covar[j, j])
                         if abs(corr_val) > 0.1:
-                            correlations_str += f"    ({name1}, {name2}) = {corr_val:+.4f}\\n"
+                            # Display log_tau as tau for clarity
+                            display_name1 = name1.replace('log_tau_', 'tau_')
+                            display_name2 = name2.replace('log_tau_', 'tau_')
+                            correlations_str += f"    ({display_name1}, {display_name2}) = {corr_val:+.4f}\\n"
                     except:
                         pass
 
