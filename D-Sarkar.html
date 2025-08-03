@@ -951,7 +951,11 @@ def run_analysis(csv_content, method):
     params = Parameters()
     dk_data = np.real(complex_epsilon_data)
     params.add('eps_inf', value=initial_params['eps_inf'], min=1.0, max=dk_data.max())
-    params.add('delta_eps', value=initial_params['delta_eps'], min=0.0, max=10)
+
+    # Derive bounds from data span to handle both positive and negative cases
+    eps_span = np.ptp(np.real(complex_epsilon_data))
+    params.add('delta_eps', value=initial_params['delta_eps'],
+               min=-2*eps_span, max=2*eps_span)
     omega1_min_rad = 2 * np.pi * 0.1e9
     omega2_max_rad = 2 * np.pi * 1500e9
 
@@ -1098,9 +1102,12 @@ Information Criteria:
                 omega2: f2_ghz
             };
 
+            // Make delta_eps range symmetric around initial guess
+            const span = Math.max(Math.abs(uiParams.delta_eps) * 2, 0.5);
+
             const ranges = {
                 eps_inf: { min: 1, max: Math.max(uiParams.eps_inf * 2, 10), step: 0.01 },
-                delta_eps: { min: 0, max: 10, step: 0.01 },
+                delta_eps: { min: -span, max: span, step: span / 500 },
                 omega1: { min: uiParams.omega1 / 10, max: uiParams.omega1 * 10, step: uiParams.omega1 / 100 },
                 omega2: { min: uiParams.omega1 * 1.1, max: uiParams.omega1 * 150, step: uiParams.omega1 / 100 },
             };
@@ -1376,6 +1383,12 @@ Information Criteria:
                 clearTimeout(updateTimeout);
                 updateTimeout = setTimeout(updateUIFromControls, 50);
             });
+        });
+
+        // Additional UI validation for delta_eps consistency
+        paramControls.delta_eps.input.addEventListener('input', e => {
+            const v = parseFloat(e.target.value);
+            paramControls.delta_eps.slider.value = v;
         });
 
         fileUpload.addEventListener('change', (event) => {
