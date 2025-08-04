@@ -544,13 +544,11 @@ Fitted Parameters:
                 pyodide = await loadPyodide();
 
                 showStatus("Installing required packages...");
-                await pyodide.loadPackage(["numpy", "pandas", "matplotlib", "scipy"]);
+                await pyodide.loadPackage(["numpy", "pandas", "matplotlib", "scipy", "micropip"]);
 
-                showStatus("Installing lmfit...");
-                await pyodide.runPython("import micropip; await micropip.install('lmfit')");
-
-                showStatus("Installing plotly...");
-                await pyodide.runPython("import micropip; await micropip.install('plotly')");
+                showStatus("Installing lmfit and plotly...");
+                const micropip = pyodide.pyimport('micropip');
+                await micropip.install(['lmfit', 'plotly']);
 
                 showStatus("Setting up analysis environment...");
                 pyodide.runPython(pythonScript);
