@@ -461,5 +461,3 @@ This algorithm implements a physically meaningful approach to dielectric spectro
 4. **Noise-aware evaluation** provides meaningful quality assessment
 5. **Comprehensive validation** catches common fitting problems
 6. **Stable numerics** handle edge cases gracefully
-
-The implementation balances physical accuracy, numerical stability, and practical usability for real-world dielectric measurements.
