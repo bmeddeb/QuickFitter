@@ -110,6 +110,24 @@
                             <option value="lbfgsb">lbfgsb</option>
                         </select>
                     </div>
+                    <div>
+                        <label for="weight-scheme" class="block text-sm font-medium text-gray-700 mt-4">Weighting Scheme</label>
+                        <select id="weight-scheme" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                            <option value="freq" selected>1/|ε| (frequency-scaled)</option>
+                            <option value="global">Global σ (legacy)</option>
+                            <option value="equal">Equal</option>
+                        </select>
+                        <div class="mt-2 flex items-center space-x-4">
+                            <label class="inline-flex items-center">
+                                <input type="checkbox" id="robust-toggle" class="form-checkbox h-4 w-4 text-blue-600 rounded">
+                                <span class="ml-2 text-sm">Robust (Huber)</span>
+                            </label>
+                            <label class="inline-flex items-center">
+                                <input type="checkbox" id="log-toggle" class="form-checkbox h-4 w-4 text-blue-600 rounded">
+                                <span class="ml-2 text-sm">Log residuals</span>
+                            </label>
+                        </div>
+                    </div>
                     <button id="run-button" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
                         Run Analysis
                     </button>
@@ -189,6 +207,9 @@
         const downloadButton = document.getElementById('download-button');
         const nTermsSelect = document.getElementById('n-terms');
         const fitMethodSelect = document.getElementById('fit-method');
+        const weightSchemeSelect = document.getElementById('weight-scheme');
+        const robustToggle = document.getElementById('robust-toggle');
+        const logToggle = document.getElementById('log-toggle');
         const statusDiv = document.getElementById('status');
         const statusMessage = document.getElementById('status-message');
         const outputDiv = document.getElementById('output');
@@ -328,7 +349,7 @@ class FitEvaluator:
             n_terms = json_data.get('n_terms', 2)
             param_names.append('eps_inf')
             for i in range(n_terms):
-                param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'gamma{i+1}'])
+                param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'q{i+1}'])
 
             try:
                 for i in range(len(corr_matrix)):
@@ -605,8 +626,8 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
         # Alpha parameter - start near 0.8 for most materials
         alpha = 0.8
 
-        # Gamma - scale with omega0
-        gamma = omega0 / 20  # Q-factor of ~20 as starting point
+        # Q-factor parameter - dimensionless ratio gamma/omega0
+        q = 0.05  # Q-factor of ~20 (1/q) as starting point
 
         # Assign parameters
         params[f'delta_eps_D{term_num}'] = delta_eps * 0.6
@@ -614,7 +635,7 @@ def estimate_initial_parameters(f_ghz, complex_epsilon, n_terms):
         params[f'alpha{term_num}'] = alpha
         params[f'delta_eps_L{term_num}'] = delta_eps * 0.4
         params[f'omega0{term_num}'] = omega0
-        params[f'gamma{term_num}'] = gamma
+        params[f'q{term_num}'] = q
 
     return params
 
@@ -645,7 +666,7 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
                 param_dict[f'alpha{i+1}'] = float(params[f'alpha{i+1}']) if f'alpha{i+1}' in params else 0.8
                 param_dict[f'delta_eps_L{i+1}'] = float(params[f'delta_eps_L{i+1}']) if f'delta_eps_L{i+1}' in params else 0.1
                 param_dict[f'omega0{i+1}'] = float(params[f'omega0{i+1}']) if f'omega0{i+1}' in params else 1e10
-                param_dict[f'gamma{i+1}'] = float(params[f'gamma{i+1}']) if f'gamma{i+1}' in params else 1e8
+                param_dict[f'q{i+1}'] = float(params[f'q{i+1}']) if f'q{i+1}' in params else 0.05
             params = param_dict
 
     # Ensure f_ghz is a numpy array
@@ -662,7 +683,8 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
         alpha = float(params[f'alpha{i+1}'])
         delta_L = float(params[f'delta_eps_L{i+1}'])
         omega0 = float(params[f'omega0{i+1}'])
-        gamma = float(params[f'gamma{i+1}'])
+        q = float(params[f'q{i+1}'])
+        gamma = q * omega0  # Calculate gamma from dimensionless ratio
 
         # Independent Debye term with Cole-Cole modification
         debye = delta_D / (1 + (1j * omega * tau_D) ** alpha)
@@ -675,28 +697,65 @@ def calculate_hybrid_model(params, f_ghz, n_terms):
 
     return complex_epsilon
 
-def residual(params, f_ghz, complex_epsilon_data, n_terms):
+def huber_weight(residual, c=1.345):
+    """
+    Calculate Huber weights for robust regression.
+    c is the tuning constant (1.345 gives 95% efficiency for normal errors)
+    """
+    abs_res = np.abs(residual)
+    weights = np.ones_like(abs_res)
+    outliers = abs_res > c
+    weights[outliers] = c / abs_res[outliers]
+    return weights
+
+def residual(params, f_ghz, complex_epsilon_data, n_terms, 
+             real_w=None, imag_w=None, 
+             robust=False, log_weighting=False):
     p_dict = params.valuesdict()
     model_epsilon = calculate_hybrid_model(p_dict, f_ghz, n_terms)
 
     real_residual = (np.real(model_epsilon) - np.real(complex_epsilon_data))
     imag_residual = (np.imag(model_epsilon) - np.imag(complex_epsilon_data))
 
-    # Dynamic residual weighting using data standard deviation
-    sigma_r = np.std(np.real(complex_epsilon_data))
-    sigma_i = np.std(np.imag(complex_epsilon_data))
+    # Default weights if not provided
+    if real_w is None:
+        # Frequency-dependent weighting: 1/|ε|
+        real_data = np.abs(np.real(complex_epsilon_data))
+        real_w = 1.0 / np.maximum(0.01 * np.mean(real_data), real_data)
+        # Normalize weights to median of 1
+        real_w = real_w / np.median(real_w)
+    
+    if imag_w is None:
+        # Frequency-dependent weighting: 1/|ε|
+        imag_data = np.abs(np.imag(complex_epsilon_data))
+        imag_w = 1.0 / np.maximum(0.01 * np.mean(imag_data), imag_data)
+        # Normalize weights to median of 1
+        imag_w = imag_w / np.median(imag_w)
 
-    # Prevent division by zero
-    sigma_r = max(sigma_r, 1e-10)
-    sigma_i = max(sigma_i, 1e-10)
+    # Optional log scaling for wide dynamic range
+    if log_weighting:
+        real_residual = np.sign(real_residual) * np.log1p(np.abs(real_residual))
+        imag_residual = np.sign(imag_residual) * np.log1p(np.abs(imag_residual))
 
-    return np.concatenate([real_residual / sigma_r, imag_residual / sigma_i])
+    # Robust Huber down-weighting
+    if robust:
+        # Scale residuals by weights first to get standardized residuals
+        real_std_res = real_residual * real_w
+        imag_std_res = imag_residual * imag_w
+        
+        huber_r = huber_weight(real_std_res)
+        huber_i = huber_weight(imag_std_res)
+        
+        real_w = real_w * huber_r
+        imag_w = imag_w * huber_i
+
+    return np.concatenate([real_residual * real_w, imag_residual * imag_w])
 
 def calculate_jacobian(params_dict, f_ghz, n_terms):
     """Calculate Jacobian matrix using finite differences with relative step"""
     param_names = ['eps_inf']
     for i in range(n_terms):
-        param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'gamma{i+1}'])
+        param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'q{i+1}'])
 
     n_params = len(param_names)
     n_data = len(f_ghz) * 2  # real and imag parts
@@ -759,7 +818,7 @@ def format_correlation_matrix(corr_matrix, n_terms):
 
     param_names = ['eps_inf']
     for i in range(n_terms):
-        param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'gamma{i+1}'])
+        param_names.extend([f'delta_eps_D{i+1}', f'tau_D{i+1}', f'alpha{i+1}', f'delta_eps_L{i+1}', f'omega0{i+1}', f'q{i+1}'])
 
     result = "Correlations:\\n"
 
@@ -819,7 +878,7 @@ def create_downloadable_plot(fitted_params, n_terms):
                 param_dict[f'alpha{i+1}'] = float(fitted_params[f'alpha{i+1}']) if f'alpha{i+1}' in fitted_params else 0.8
                 param_dict[f'delta_eps_L{i+1}'] = float(fitted_params[f'delta_eps_L{i+1}']) if f'delta_eps_L{i+1}' in fitted_params else 0.1
                 param_dict[f'omega0{i+1}'] = float(fitted_params[f'omega0{i+1}']) if f'omega0{i+1}' in fitted_params else 1e10
-                param_dict[f'gamma{i+1}'] = float(fitted_params[f'gamma{i+1}']) if f'gamma{i+1}' in fitted_params else 1e8
+                param_dict[f'q{i+1}'] = float(fitted_params[f'q{i+1}']) if f'q{i+1}' in fitted_params else 0.05
             fitted_params = param_dict
     fitted_epsilon = calculate_hybrid_model(fitted_params, global_f_ghz, n_terms)
 
@@ -856,13 +915,14 @@ def create_downloadable_plot(fitted_params, n_terms):
     buf.seek(0)
     return buf.getvalue()
 
-def run_analysis(csv_content, n_terms, method):
+def run_analysis(csv_content, n_terms, method, 
+                 weighting_scheme='freq', robust=False, log_weighting=False):
     global global_f_ghz, global_complex_epsilon
     f_ghz, complex_epsilon_data = load_data(csv_content)
 
-    # Check if we have enough data
-    if len(f_ghz) < n_terms * 6 + 1:
-        raise ValueError(f"Insufficient data points ({len(f_ghz)}) for {n_terms} terms. Need at least {n_terms * 6 + 1} points.")
+    # Check if we have enough data (5 independent params per term + eps_inf)
+    if len(f_ghz) < n_terms * 5 + 1:
+        raise ValueError(f"Insufficient data points ({len(f_ghz)}) for {n_terms} terms. Need at least {n_terms * 5 + 1} points.")
 
     initial_params = estimate_initial_parameters(f_ghz, complex_epsilon_data, n_terms)
     params = Parameters()
@@ -921,20 +981,46 @@ def run_analysis(csv_content, n_terms, method):
                    min=omega_min * 0.1,  # Allow some flexibility
                    max=omega_max * 10)
 
-        # Gamma with proper bounds
-        gamma_init = initial_params[f'gamma{i+1}']
-        gamma_min = omega0_init * 1e-4
-        gamma_max = omega0_init
-        gamma_init = np.clip(gamma_init, gamma_min * 1.1, gamma_max * 0.9)
+        # Use dimensionless quality factor ratio q = gamma/omega0
+        # This automatically keeps gamma < omega0 during optimization
+        q_init = initial_params[f'q{i+1}']
+        q_init = np.clip(q_init, 1e-4, 1.0)  # Reasonable bounds for q
 
-        params.add(f'gamma{i+1}',
-                   value=gamma_init,
-                   min=gamma_min,
-                   max=gamma_max)
+        params.add(f'q{i+1}',
+                   value=q_init,
+                   min=1e-4,
+                   max=1.0)
+        
+        # gamma is now an expression linked to omega0
+        params.add(f'gamma{i+1}', expr=f'q{i+1}*omega0{i+1}')
 
+    # Prepare weights based on weighting scheme
+    real_w = None
+    imag_w = None
+    
+    if weighting_scheme == 'equal':
+        # Equal weighting
+        real_w = np.ones(len(f_ghz))
+        imag_w = np.ones(len(f_ghz))
+    elif weighting_scheme == 'global':
+        # Legacy global standard deviation weighting
+        sigma_r = np.std(np.real(complex_epsilon_data))
+        sigma_i = np.std(np.imag(complex_epsilon_data))
+        sigma_r = max(sigma_r, 1e-10)
+        sigma_i = max(sigma_i, 1e-10)
+        real_w = np.ones(len(f_ghz)) / sigma_r
+        imag_w = np.ones(len(f_ghz)) / sigma_i
+    # elif weighting_scheme == 'user':
+    #     # Future: load user-supplied weights from additional columns
+    #     pass
+    # else: weighting_scheme == 'freq' (default)
+    #     # Handled inside residual function when weights are None
+    
     # Run minimization with error handling
     try:
-        minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_terms))
+        minimizer = Minimizer(residual, params, 
+                            fcn_args=(f_ghz, complex_epsilon_data, n_terms, 
+                                    real_w, imag_w, robust, log_weighting))
         result = minimizer.minimize(method=method)
     except ValueError as e:
         # If initial values are infeasible, try with relaxed bounds
@@ -953,16 +1039,24 @@ def run_analysis(csv_content, n_terms, method):
             # Use mid-range frequency for omega0
             omega0_mid = (omega_min + omega_max) / 2
             params.add(f'omega0{i+1}', value=omega0_mid, min=omega_min * 0.01, max=omega_max * 100)
-            params.add(f'gamma{i+1}', value=omega0_mid / 20, min=omega0_mid * 1e-5, max=omega0_mid)
+            
+            # Use dimensionless q parameter for fallback too
+            params.add(f'q{i+1}', value=0.05, min=1e-4, max=1.0)
+            params.add(f'gamma{i+1}', expr=f'q{i+1}*omega0{i+1}')
 
-        minimizer = Minimizer(residual, params, fcn_args=(f_ghz, complex_epsilon_data, n_terms))
+        minimizer = Minimizer(residual, params, 
+                            fcn_args=(f_ghz, complex_epsilon_data, n_terms, 
+                                    real_w, imag_w, robust, log_weighting))
         result = minimizer.minimize(method=method)
 
-    fit_params = {p: float(v.value) for p, v in result.params.items()}
+    # Extract all parameters including those defined by expressions
+    fit_params = {}
+    for p, v in result.params.items():
+        fit_params[p] = float(v.value)
 
     # Use lmfit's correctly weighted statistical measures
     n_dat = len(f_ghz) * 2  # real and imag parts
-    n_var = 1 + 6 * n_terms  # eps_inf + 6 params per term
+    n_var = 1 + 5 * n_terms  # eps_inf + 5 independent params per term (q is not independent)
 
     # Get properly weighted chi-square from lmfit result
     chi_sqr = result.chisqr if hasattr(result, 'chisqr') else 0.0
@@ -1002,7 +1096,8 @@ with independent amplitudes and correct physical damping (2γω).
         params_text += f"        alpha{i+1}      = {fit_params[f'alpha{i+1}']:.4f}\\n"
         params_text += f"        delta_eps_L{i+1} = {fit_params[f'delta_eps_L{i+1}']:.4f}\\n"
         params_text += f"        omega0{i+1}     = {fit_params[f'omega0{i+1}']:.4e} rad/s\\n"
-        params_text += f"        gamma{i+1}      = {fit_params[f'gamma{i+1}']:.4e} rad/s\\n"
+        params_text += f"        q{i+1}          = {fit_params[f'q{i+1}']:.4f}\\n"
+        params_text += f"        gamma{i+1}      = {fit_params[f'q{i+1}'] * fit_params[f'omega0{i+1}']:.4e} rad/s (=q{i+1}*ω0{i+1})\\n"
 
     # Create full report
     full_report = f"""Hybrid Debye-Lorentz Fit Report
@@ -1040,6 +1135,9 @@ Residual Analysis
 Optimization Details
 --------------------------------------------------
 Method: {method}
+Weighting scheme: {weighting_scheme}
+Robust (Huber): {robust}
+Log residuals: {log_weighting}
 Success: {result.success}
 Message: {result.message}
 """
@@ -1220,13 +1318,13 @@ Message: {result.message}
                                 <span class="text-xs text-gray-500">Range: <span id="omega0${i+1}_range"></span></span>
                             </div>
                         </div>
-                        <!-- gamma parameter -->
+                        <!-- q parameter -->
                         <div>
-                            <div class="text-xs text-gray-600 mb-1">γ<sub>${i+1}</sub> (Damping parameter, rad/s)</div>
-                            <input type="range" id="gamma${i+1}_slider" class="w-full">
+                            <div class="text-xs text-gray-600 mb-1">q<sub>${i+1}</sub> (Quality factor ratio γ/ω₀)</div>
+                            <input type="range" id="q${i+1}_slider" class="w-full">
                             <div class="flex items-center justify-between">
-                                <input type="number" id="gamma${i+1}_input" class="param-input" step="1e7">
-                                <span class="text-xs text-gray-500">Range: <span id="gamma${i+1}_range"></span></span>
+                                <input type="number" id="q${i+1}_input" class="param-input" step="0.001">
+                                <span class="text-xs text-gray-500">Range: <span id="q${i+1}_range"></span></span>
                             </div>
                         </div>
                     </div>
@@ -1234,7 +1332,7 @@ Message: {result.message}
                 parametersDisplay.appendChild(termDiv);
 
                 // Add controls for this term
-                const termParams = ['delta_eps_D', 'tau_D', 'alpha', 'delta_eps_L', 'omega0', 'gamma'];
+                const termParams = ['delta_eps_D', 'tau_D', 'alpha', 'delta_eps_L', 'omega0', 'q'];
                 termParams.forEach(param => {
                     const key = `${param}${i+1}`;
                     paramControls[key] = {
@@ -1312,15 +1410,14 @@ Message: {result.message}
                 };
                 setControlValues(`omega0${i+1}`, omega0_val, omega0_range);
 
-                // gamma parameter (logarithmic scale)
-                const gamma_val = params[`gamma${i+1}`];
-                const gamma_range = {
-                    min: 1e7,
-                    max: 1e12,
-                    step: 1e7,
-                    logScale: true
+                // q parameter (linear scale)
+                const q_val = params[`q${i+1}`];
+                const q_range = {
+                    min: 1e-4,
+                    max: 1.0,
+                    step: 0.001
                 };
-                setControlValues(`gamma${i+1}`, gamma_val, gamma_range);
+                setControlValues(`q${i+1}`, q_val, q_range);
             }
 
             // Add event listeners
@@ -1384,8 +1481,8 @@ Message: {result.message}
 
             // Term parameter listeners
             for (let i = 0; i < n_terms; i++) {
-                // Regular parameters (delta_eps_D, alpha, delta_eps_L)
-                ['delta_eps_D', 'alpha', 'delta_eps_L'].forEach(param => {
+                // Regular parameters (delta_eps_D, alpha, delta_eps_L, q)
+                ['delta_eps_D', 'alpha', 'delta_eps_L', 'q'].forEach(param => {
                     const key = `${param}${i+1}`;
                     const control = paramControls[key];
                     if (control) {
@@ -1451,29 +1548,6 @@ Message: {result.message}
                     });
                 }
 
-                // gamma parameter (logarithmic)
-                const gammaControl = paramControls[`gamma${i+1}`];
-                if (gammaControl) {
-                    gammaControl.slider.addEventListener('input', (e) => {
-                        const logMin = Math.log10(1e7);
-                        const logMax = Math.log10(1e12);
-                        const logValue = logMin + (e.target.value / 100) * (logMax - logMin);
-                        const value = Math.pow(10, logValue);
-                        gammaControl.input.value = value.toExponential(2);
-                        clearTimeout(updateTimeout);
-                        updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
-                    });
-
-                    gammaControl.input.addEventListener('input', (e) => {
-                        const value = parseFloat(e.target.value);
-                        const logMin = Math.log10(1e7);
-                        const logMax = Math.log10(1e12);
-                        const logValue = Math.log10(value);
-                        gammaControl.slider.value = ((logValue - logMin) / (logMax - logMin)) * 100;
-                        clearTimeout(updateTimeout);
-                        updateTimeout = setTimeout(() => updateUIFromControls(n_terms), 50);
-                    });
-                }
             }
         }
 
@@ -1491,7 +1565,7 @@ Message: {result.message}
                 params[`alpha${i+1}`] = parseFloat(paramControls[`alpha${i+1}`].input.value);
                 params[`delta_eps_L${i+1}`] = parseFloat(paramControls[`delta_eps_L${i+1}`].input.value);
                 params[`omega0${i+1}`] = parseFloat(paramControls[`omega0${i+1}`].input.value);
-                params[`gamma${i+1}`] = parseFloat(paramControls[`gamma${i+1}`].input.value);
+                params[`q${i+1}`] = parseFloat(paramControls[`q${i+1}`].input.value);
             }
 
             // Initialize proxy variables for cleanup
@@ -1547,7 +1621,7 @@ Message: {result.message}
                     paramsText += `    alpha${i+1}      = ${params[`alpha${i+1}`].toFixed(4)}\n`;
                     paramsText += `    delta_eps_L${i+1} = ${params[`delta_eps_L${i+1}`].toFixed(4)}\n`;
                     paramsText += `    omega0${i+1}     = ${params[`omega0${i+1}`].toExponential(4)} rad/s\n`;
-                    paramsText += `    gamma${i+1}      = ${params[`gamma${i+1}`].toFixed(4)}\n`;
+                    paramsText += `    q${i+1}          = ${params[`q${i+1}`].toFixed(4)}\n`;
                 }
 
                 const reportText = reportOutput.textContent;
@@ -1657,7 +1731,7 @@ Message: {result.message}
                     params[`alpha${i+1}`] = parseFloat(paramControls[`alpha${i+1}`].input.value);
                     params[`delta_eps_L${i+1}`] = parseFloat(paramControls[`delta_eps_L${i+1}`].input.value);
                     params[`omega0${i+1}`] = parseFloat(paramControls[`omega0${i+1}`].input.value);
-                    params[`gamma${i+1}`] = parseFloat(paramControls[`gamma${i+1}`].input.value);
+                    params[`q${i+1}`] = parseFloat(paramControls[`q${i+1}`].input.value);
                 }
 
                 // 1. Create Fitted Data CSV
@@ -1771,7 +1845,11 @@ Message: {result.message}
                 const runAnalysis = pyodide.globals.get('run_analysis');
                 const n_terms = parseInt(nTermsSelect.value);
                 const fitMethod = fitMethodSelect.value;
-                const resultJson = runAnalysis(fileContent, n_terms, fitMethod);
+                const weightScheme = weightSchemeSelect.value;
+                const robustFlag = robustToggle.checked;
+                const logFlag = logToggle.checked;
+                const resultJson = runAnalysis(fileContent, n_terms, fitMethod, 
+                                             weightScheme, robustFlag, logFlag);
                 const result = JSON.parse(resultJson);
 
                 currentData = result;
